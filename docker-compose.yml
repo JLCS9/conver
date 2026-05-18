@@ -1,19 +1,15 @@
 # Converflow production stack.
-# Two services: the Next.js backend and a Caddy reverse proxy that fronts it
-# with automatic Let's Encrypt SSL.
+#
+# Only the Next.js backend runs in docker. SSL termination and HTTP/HTTPS
+# routing are handled by the host nginx (already running on this VPS for
+# other projects), which proxies api.converflow.tech to this backend on
+# 127.0.0.1:8082. See scripts/nginx-api.converflow.tech.conf for the vhost.
 #
 # Deploy on the VPS:
-#   cd /opt/converflow
-#   ./scripts/deploy.sh
-#
-# Or manually:
-#   git pull --ff-only
-#   docker compose up -d --build
-#   docker compose ps
+#   cd /opt/converflow && ./scripts/deploy.sh
 #
 # Logs:
 #   docker compose logs -f backend
-#   docker compose logs -f caddy
 
 services:
   backend:
@@ -25,41 +21,12 @@ services:
     restart: unless-stopped
     env_file:
       - ./backend/.env.local
-    networks:
-      - converflow
-    expose:
-      - "3000"
+    # Bind only to localhost — public traffic comes through host nginx.
+    ports:
+      - "127.0.0.1:8082:3000"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 20s
-
-  caddy:
-    image: caddy:2-alpine
-    container_name: converflow-caddy
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    networks:
-      - converflow
-    depends_on:
-      backend:
-        condition: service_started
-
-networks:
-  converflow:
-    driver: bridge
-
-volumes:
-  caddy_data:
-    name: converflow_caddy_data
-  caddy_config:
-    name: converflow_caddy_config

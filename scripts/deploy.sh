@@ -47,5 +47,8 @@ echo "==> Recent caddy logs:"
 docker compose logs --tail 10 caddy || true
 
 echo
-echo "==> Done. Test from your laptop:"
-echo "      curl -i https://api.converflow.tech/api/health"
+echo "==> Done."
+echo "    Local check (on this VPS):  curl -i http://127.0.0.1:8082/api/health"
+echo "    Public check (from laptop): curl -i https://api.converflow.tech/api/health"
+echo "    (Public check requires the host nginx vhost + SSL — see"
+echo "     scripts/nginx-api.converflow.tech.conf for the one-time install.)"

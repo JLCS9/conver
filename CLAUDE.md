@@ -25,7 +25,7 @@ Naming caveat: there is a prior product also called "Converflow" (B2B collection
 | Styling | NativeWind v4 |
 | Mobile UI primitives | React Native Reusables |
 | Backend framework | Next.js 15 (App Router, API-only, standalone build) |
-| Backend hosting | Hostinger VPS in Paris — Docker Compose + Caddy v2 |
+| Backend hosting | Hostinger VPS in Paris — Docker Compose for the Next.js container; host nginx (pre-existing on the VPS for other projects) fronts it with certbot SSL |
 | Auth | Clerk (`@clerk/expo` on mobile, `@clerk/nextjs` server-side) |
 | Database | Supabase (Postgres + RLS), region eu-west |
 | Voice IA | **Gemini Live API** (Google AI Studio / Vertex AI, `europe-west1`) |
@@ -126,6 +126,8 @@ EU: Stripe web checkout (saves 15-30% Apple fee via DMA). Non-EU: Apple IAP / Go
 
 - VPS: Hostinger `srv1433126.hstgr.cloud` / 187.77.166.246, Paris, Debian 13, root for setup. Deploy user `deploy` exists but is dormant until we add CI/CD. App lives at `/opt/converflow/` on the VPS.
 - Backend deploy is **manual pull-based for MVP**: locally we push to `main`, on the VPS `cd /opt/converflow && ./scripts/deploy.sh` does `git pull --ff-only && docker compose up -d --build`. Automated CI/CD via GitHub Actions is backlog for month 3+.
+- The backend container binds only to `127.0.0.1:8082`. Public traffic enters through host nginx (already running for other projects on this VPS), with a vhost at `/etc/nginx/sites-enabled/api.converflow.tech` (template at `scripts/nginx-api.converflow.tech.conf`). SSL via certbot's `--nginx` plugin, auto-renewing.
+- `git pull` from `/opt/converflow` must be run with `git config --global --add safe.directory /opt/converflow` exception set (one-time) because the dir is owned by `deploy` but commands typically run as root.
 - Supabase project is connected to this repo via the Supabase GitHub integration. Migrations in `supabase/migrations/` auto-apply on push to `main`.
 - Mobile builds via EAS Build (`mobile/eas.json`). Distribution: TestFlight (iOS) for beta and prod; Google Play internal track (Android, after month 3-4).
 - Domain: currently `api.converflow.tech` while `converflow.ai` finishes its registrar transfer. To swap once `.ai` is live: edit Caddyfile (one block), edit `mobile/.env*` (one variable), redeploy. Bundle ID stays `ai.converflow.app`.
@@ -134,3 +136,4 @@ EU: Stripe web checkout (saves 15-30% Apple fee via DMA). Non-EU: Apple IAP / Go
 
 - 2026-05-17: Repo bootstrap. Locked Gemini Live for v1 voice; Hostinger Paris VPS over Vercel; bundle ID `ai.converflow.app`; three-commit scaffolding plan (repo skeleton → backend deploy → mobile + supabase).
 - 2026-05-18: Switched to manual pull-based deploy (`scripts/deploy.sh`) instead of GitHub Actions CI/CD — simpler for MVP, can upgrade later. Transition domain `api.converflow.tech` until `.ai` registrar transfer completes.
+- 2026-05-18 (later): Dropped dockerized Caddy in favor of host nginx + certbot. Reason: VPS already runs nginx for other projects on ports 80/443 — duplicating reverse proxies would conflict. Backend container now binds `127.0.0.1:8082`; nginx vhost in `scripts/nginx-api.converflow.tech.conf`.
