@@ -38,9 +38,10 @@ Naming caveat: there is a prior product also called "Converflow" (B2B collection
 | Push | Expo Notifications + Expo Push Service |
 | Builds | EAS Build |
 | OTA | EAS Update (runtimeVersion pinned to sdkVersion) |
-| Domain | converflow.ai |
+| Domain (final) | converflow.ai (registrar transfer in progress, ETA a few days) |
+| Domain (transition) | converflow.tech (used during the .ai transfer; swap is a 1-line Caddyfile + env change) |
 | iOS bundle ID | ai.converflow.app |
-| Backend API | api.converflow.ai → VPS 187.77.166.246 (Hostinger Paris, ~38ms RTT from Madrid measured) |
+| Backend API | api.converflow.tech → VPS 187.77.166.246 (Hostinger Paris, ~38ms RTT from Madrid measured) |
 
 ### Voice provider rationale
 
@@ -123,12 +124,13 @@ EU: Stripe web checkout (saves 15-30% Apple fee via DMA). Non-EU: Apple IAP / Go
 
 ## Operational ground truth
 
-- VPS: Hostinger `srv1433126.hstgr.cloud` / 187.77.166.246, Paris, Debian 13, root for setup. Deploy user is `deploy`. App lives at `/opt/converflow/` on the VPS.
-- Backend deploys via GitHub Actions on push to `main`: build image → push to GHCR → SSH to VPS as `deploy` → `docker compose pull && up -d`.
+- VPS: Hostinger `srv1433126.hstgr.cloud` / 187.77.166.246, Paris, Debian 13, root for setup. Deploy user `deploy` exists but is dormant until we add CI/CD. App lives at `/opt/converflow/` on the VPS.
+- Backend deploy is **manual pull-based for MVP**: locally we push to `main`, on the VPS `cd /opt/converflow && ./scripts/deploy.sh` does `git pull --ff-only && docker compose up -d --build`. Automated CI/CD via GitHub Actions is backlog for month 3+.
 - Supabase project is connected to this repo via the Supabase GitHub integration. Migrations in `supabase/migrations/` auto-apply on push to `main`.
 - Mobile builds via EAS Build (`mobile/eas.json`). Distribution: TestFlight (iOS) for beta and prod; Google Play internal track (Android, after month 3-4).
-- Domain `converflow.ai` — DNS managed by the user. `api.converflow.ai` A record → 187.77.166.246.
+- Domain: currently `api.converflow.tech` while `converflow.ai` finishes its registrar transfer. To swap once `.ai` is live: edit Caddyfile (one block), edit `mobile/.env*` (one variable), redeploy. Bundle ID stays `ai.converflow.app`.
 
 ## Commit log of decisions
 
 - 2026-05-17: Repo bootstrap. Locked Gemini Live for v1 voice; Hostinger Paris VPS over Vercel; bundle ID `ai.converflow.app`; three-commit scaffolding plan (repo skeleton → backend deploy → mobile + supabase).
+- 2026-05-18: Switched to manual pull-based deploy (`scripts/deploy.sh`) instead of GitHub Actions CI/CD — simpler for MVP, can upgrade later. Transition domain `api.converflow.tech` until `.ai` registrar transfer completes.
