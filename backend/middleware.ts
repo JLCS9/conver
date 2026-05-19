@@ -4,6 +4,8 @@ import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 // /api/health stays public (liveness probe).
 const isProtectedRoute = createRouteMatcher([
   "/api/me(.*)",
+  "/api/onboarding(.*)",
+  "/api/push(.*)",
   // Add new protected route prefixes here as we build them.
 ]);
 
