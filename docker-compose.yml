@@ -42,6 +42,11 @@ services:
     # SUPABASE_* are shared across services. No secret duplication.
     env_file:
       - ./backend/.env.local
+    # The shared env_file has PORT=3000 (Next.js backend's listening port).
+    # Override here so the voice-gateway binds to 8083 inside the container;
+    # otherwise the host port-map (127.0.0.1:8083 → 8083) lands on nothing.
+    environment:
+      PORT: 8083
     # Bind only to localhost — host nginx fronts /voice → 8083.
     ports:
       - "127.0.0.1:8083:8083"
