@@ -1,3 +1,4 @@
+import "../global.css";
 import { ClerkProvider } from "@clerk/clerk-expo";
 import { Slot } from "expo-router";
 import { tokenCache } from "@/src/lib/tokenCache";

@@ -1,7 +1,8 @@
-// Default Expo Metro config. We export it as-is for now; NativeWind and
-// other transformers will plug in here when we add them in a later commit.
+// Metro config wired with NativeWind v4. The CSS file is processed at
+// bundle time so Tailwind utilities reach the runtime as style objects.
 const { getDefaultConfig } = require("expo/metro-config");
+const { withNativeWind } = require("nativewind/metro");
 
 const config = getDefaultConfig(__dirname);
 
-module.exports = config;
+module.exports = withNativeWind(config, { input: "./global.css" });
