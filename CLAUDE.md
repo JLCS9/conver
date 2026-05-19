@@ -1,7 +1,7 @@
 # Converflow — Project context for Claude
 
 > Live decisions and project state. Future Claude sessions read this first.
-> Last updated: 2026-05-17.
+> Last updated: 2026-05-19.
 
 ## Product
 
@@ -140,3 +140,4 @@ EU: Stripe web checkout (saves 15-30% Apple fee via DMA). Non-EU: Apple IAP / Go
 - 2026-05-18 (later, Commit 3a): Initial Supabase schema (`supabase/migrations/20260518200000_init.sql`). Eight tables (users, daily_prompts, sessions, subscriptions, voice_usage_logs, push_tokens, streaks, push_deliveries) with RLS via `public.clerk_user_id()` helper. Clerk integrated via Supabase Third-Party Auth — JWTs from Clerk pass straight to RLS through `auth.jwt() ->> 'sub'`.
 - 2026-05-18 (later, Commit 3b): Backend Clerk integration via `@clerk/nextjs@^6`. `middleware.ts` protects `/api/me` (health stays public). `lib/supabaseAdmin.ts` lazy-inits the service_role client. `GET /api/me` upserts the user row from Clerk and returns the profile. Clerk's `auth.protect()` returns 404 (not 401) for unauthenticated API calls — this is by design.
 - 2026-05-18 (later, Commit 3c): Expo SDK 51 mobile app scaffolded. Routes: `(auth)/sign-in|sign-up|verify` (email + password), `(app)/index` (home with `/api/me` call). Clerk via `@clerk/clerk-expo@^2` with `expo-secure-store` token cache. `src/lib/api.ts` typed-fetch wrapper auto-attaches Clerk Bearer token. Bundle ID `ai.converflow.app`, scheme `converflow`, mic usage description set for App Store. Closes the end-to-end auth loop: Expo → Clerk JWT → backend → Supabase upsert → user row returned.
+- 2026-05-19: **Week 1 milestone closed — end-to-end auth loop verified live on iPhone 17 Pro (iOS 26.5) Simulator.** First local dev build with Xcode 26.5 + CocoaPods 1.16.2 succeeded cleanly despite the 2-year gap between SDK 51 and iOS 26.5 (only benign `-lc++` duplicate-libraries warning). Two iterations: (1) Expo Go failed at runtime with `Cannot find native module 'ExpoCryptoAES'` — confirmed Expo Go is not viable for this stack, must use dev builds. (2) First dev build failed with `Cannot find native module 'ExpoWebBrowser'`; resolved by `npx expo install expo-web-browser expo-auth-session` (Clerk peer deps the original scaffold omitted). Second dev build ran clean: sign-up → email code → verify → home renders the Supabase user row returned by `/api/me`. Known follow-up: `expo-apple-authentication` is still missing and will be needed before we ship any social sign-in (App Store guideline). Side note: had to free ~21 GB from `~/.npm` and `~/.cache` mid-session — flagging that the dev loop is disk-hungry (mobile/node_modules 1.1 GB + ios/ build artifacts ~3 GB).
