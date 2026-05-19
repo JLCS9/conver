@@ -4,31 +4,17 @@
 // Idempotent on (user_id, expo_push_token) — the unique index in the
 // push_tokens table handles duplicates.
 //
-// Body:
-//   {
-//     expoPushToken: string,            // ExponentPushToken[...]
-//     deviceId?: string,                // installation id from expo-application
-//     platform: 'ios' | 'android'
-//   }
+// Body validated by `pushRegisterBodySchema` in lib/schemas.ts.
 //
-// In the iOS Simulator there is no real APNs delivery, so `getExpoPushTokenAsync`
-// either throws or returns a placeholder. The mobile client decides whether
-// to call this endpoint; the backend just trusts what arrives.
+// In the iOS Simulator there is no real APNs delivery, so the mobile
+// client only calls this endpoint when getExpoPushTokenAsync succeeded
+// on a physical device. Backend trusts what arrives.
 
 import { auth } from "@clerk/nextjs/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { parseJsonBody, pushRegisterBodySchema } from "@/lib/schemas";
 
 export const dynamic = "force-dynamic";
-
-interface PushRegisterBody {
-  expoPushToken: string;
-  deviceId?: string;
-  platform: "ios" | "android";
-}
-
-function badRequest(reason: string) {
-  return Response.json({ error: "bad_request", reason }, { status: 400 });
-}
 
 export async function POST(request: Request) {
   const { userId } = await auth();
@@ -36,25 +22,9 @@ export async function POST(request: Request) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return badRequest("invalid_json");
-  }
-
-  if (!body || typeof body !== "object") return badRequest("body_must_be_object");
-  const b = body as Partial<PushRegisterBody>;
-
-  if (typeof b.expoPushToken !== "string" || b.expoPushToken.length === 0 || b.expoPushToken.length > 256) {
-    return badRequest("invalid_expo_push_token");
-  }
-  if (b.platform !== "ios" && b.platform !== "android") {
-    return badRequest("invalid_platform");
-  }
-  if (b.deviceId !== undefined && (typeof b.deviceId !== "string" || b.deviceId.length > 128)) {
-    return badRequest("invalid_device_id");
-  }
+  const parsed = await parseJsonBody(request, pushRegisterBodySchema);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.data;
 
   const supabase = supabaseAdmin();
 
@@ -67,10 +37,7 @@ export async function POST(request: Request) {
 
   if (userErr || !user) {
     console.error("[/api/push/register] user lookup failed", userErr);
-    return Response.json(
-      { error: "user_not_found" },
-      { status: 404 },
-    );
+    return Response.json({ error: "user_not_found" }, { status: 404 });
   }
 
   const { data, error } = await supabase
@@ -78,21 +45,34 @@ export async function POST(request: Request) {
     .upsert(
       {
         user_id: user.id,
-        expo_push_token: b.expoPushToken,
-        device_id: b.deviceId ?? null,
-        platform: b.platform,
+        expo_push_token: body.expoPushToken,
+        device_id: body.deviceId ?? null,
+        platform: body.platform,
         last_used_at: new Date().toISOString(),
         revoked_at: null,
       },
       { onConflict: "user_id,expo_push_token", ignoreDuplicates: false },
     )
-    .select("id, user_id, expo_push_token, platform, device_id, created_at, last_used_at")
+    .select(
+      "id, user_id, expo_push_token, platform, device_id, created_at, last_used_at",
+    )
     .single();
 
   if (error) {
-    console.error("[/api/push/register] upsert failed", error);
+    console.error("[/api/push/register] upsert failed", {
+      message: error.message,
+      code: error.code,
+      hint: error.hint,
+      details: error.details,
+    });
     return Response.json(
-      { error: "db_error", details: error.message },
+      {
+        error: "db_error",
+        message: error.message,
+        code: error.code,
+        hint: error.hint,
+        details: error.details,
+      },
       { status: 500 },
     );
   }
