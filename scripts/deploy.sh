@@ -43,12 +43,18 @@ echo "==> Recent backend logs:"
 docker compose logs --tail 20 backend || true
 
 echo
-echo "==> Recent caddy logs:"
-docker compose logs --tail 10 caddy || true
+echo "==> Recent voice-gateway logs:"
+docker compose logs --tail 20 voice-gateway || true
 
 echo
 echo "==> Done."
-echo "    Local check (on this VPS):  curl -i http://127.0.0.1:8082/api/health"
-echo "    Public check (from laptop): curl -i https://api.converflow.tech/api/health"
-echo "    (Public check requires the host nginx vhost + SSL — see"
+echo "    Backend (HTTP)   local check:  curl -i http://127.0.0.1:8082/api/health"
+echo "    Backend (HTTP)   public check: curl -i https://api.converflow.tech/api/health"
+echo "    Gateway (HTTP)   local check:  curl -i http://127.0.0.1:8083/health"
+echo "    Gateway (WSS)    public check: wscat -c wss://api.converflow.tech/voice"
+echo "    (Public checks require the host nginx vhost + SSL — see"
 echo "     scripts/nginx-api.converflow.tech.conf for the one-time install.)"
+echo "    (After updating the vhost on the VPS, reload nginx:"
+echo "       sudo cp /opt/converflow/scripts/nginx-api.converflow.tech.conf \\"
+echo "              /etc/nginx/sites-available/api.converflow.tech &&"
+echo "       sudo nginx -t && sudo systemctl reload nginx )"

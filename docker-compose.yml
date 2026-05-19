@@ -30,3 +30,24 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  voice-gateway:
+    build:
+      context: ./voice-gateway
+      dockerfile: Dockerfile
+    image: converflow-voice-gateway:latest
+    container_name: converflow-voice-gateway
+    restart: unless-stopped
+    # Reuses the same env_file as backend — GEMINI_*, CLERK_SECRET_KEY,
+    # SUPABASE_* are shared across services. No secret duplication.
+    env_file:
+      - ./backend/.env.local
+    # Bind only to localhost — host nginx fronts /voice → 8083.
+    ports:
+      - "127.0.0.1:8083:8083"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8083/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
