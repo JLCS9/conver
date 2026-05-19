@@ -21,7 +21,14 @@ const config: ExpoConfig = {
     permissions: ["android.permission.RECORD_AUDIO"],
     adaptiveIcon: { backgroundColor: "#ffffff" },
   },
-  plugins: ["expo-router", "expo-secure-store"],
+  plugins: [
+    "expo-router",
+    "expo-secure-store",
+    // expo-notifications plugin: adds aps-environment entitlement on iOS so
+    // the binary can register for APNs in TestFlight/prod. The iOS Simulator
+    // doesn't deliver real APNs, so dev push testing happens on TestFlight.
+    "expo-notifications",
+  ],
   experiments: {
     typedRoutes: true,
   },
