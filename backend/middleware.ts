@@ -6,6 +6,8 @@ const isProtectedRoute = createRouteMatcher([
   "/api/me(.*)",
   "/api/onboarding(.*)",
   "/api/push(.*)",
+  "/api/realtime(.*)",
+  "/api/sessions(.*)",
   // Add new protected route prefixes here as we build them.
 ]);
 

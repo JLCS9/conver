@@ -30,6 +30,15 @@ export const pushRegisterBodySchema = z.object({
 
 export type PushRegisterBody = z.infer<typeof pushRegisterBodySchema>;
 
+/** POST /api/realtime/session body. Empty in v1; prompt format optional. */
+export const realtimeSessionBodySchema = z.object({
+  promptFormat: z
+    .enum(["news", "journal", "challenge", "tech_scenario"])
+    .optional(),
+});
+
+export type RealtimeSessionBody = z.infer<typeof realtimeSessionBodySchema>;
+
 /**
  * Parses an untyped request body against a zod schema. On failure returns
  * a Response that the route can hand back directly.
