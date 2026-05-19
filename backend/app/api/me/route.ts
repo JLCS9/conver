@@ -33,9 +33,23 @@ export async function GET() {
     .single();
 
   if (error) {
-    console.error("[/api/me] supabase upsert failed", error);
+    // Log the full PostgREST error shape — `message` alone often hides the
+    // root cause (e.g. "invalid path specified in request URL" usually
+    // travels with a `hint` that points at the misconfigured table/schema).
+    console.error("[/api/me] supabase upsert failed", {
+      message: error.message,
+      code: error.code,
+      hint: error.hint,
+      details: error.details,
+    });
     return Response.json(
-      { error: "db_error", details: error.message },
+      {
+        error: "db_error",
+        message: error.message,
+        code: error.code,
+        hint: error.hint,
+        details: error.details,
+      },
       { status: 500 },
     );
   }
