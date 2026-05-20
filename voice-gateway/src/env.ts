@@ -10,12 +10,20 @@ const envSchema = z.object({
 
   // Gemini upstream
   GEMINI_API_KEY: z.string().min(1, "GEMINI_API_KEY is required"),
-  GEMINI_MODEL: z.string().min(1).default("gemini-3.5-flash"),
+  // Live API model ID. As of May 2026, gemini-3.5-flash does NOT support
+  // bidiGenerateContent — only the gemini-2.5-flash-native-audio family
+  // and gemini-3.1-flash-live-preview do. The "latest" alias rolls forward
+  // automatically when Google releases a newer native-audio variant; pin
+  // to a dated preview (e.g. gemini-2.5-flash-native-audio-preview-12-2025)
+  // for production once we have load.
+  GEMINI_MODEL: z.string().min(1).default("gemini-2.5-flash-native-audio-latest"),
+  // v1beta is the production WS endpoint. v1alpha exposes the same models
+  // but ships pre-release surface (e.g. lyria-realtime-exp). Use v1beta.
   GEMINI_LIVE_WS_URL: z
     .string()
     .url()
     .default(
-      "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent",
+      "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
     ),
 
   // Clerk (server SDK uses the same secret as the Next.js backend)

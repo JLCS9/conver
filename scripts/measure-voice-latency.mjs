@@ -21,8 +21,12 @@
  *   --runs N   Number of repetitions (default 3). Reports min/median/max.
  *   --quiet    Suppress per-message logging.
  *
- * Requires Node ≥22 for native fetch + WebSocket.
+ * Requires Node ≥18 for native fetch. WebSocket comes from the `ws` package
+ * (installed via scripts/package.json) so this works on Node 20 too — Node
+ * only gained globalThis.WebSocket in 22.
  */
+
+import WebSocket from "ws";
 
 const args = parseArgs(process.argv.slice(2));
 if (!args.jwt) {
@@ -71,14 +75,15 @@ async function once(runIdx) {
       try { ws.close(); } catch { /* ignore */ }
     }, 30_000);
 
+    let tPromptSent = null;
+
     ws.addEventListener("open", () => {
       if (!args.quiet) {
         console.log(`  [run ${runIdx}] ws open ${ms(tAfterHandshake, performance.now())}`);
       }
-
       // Send a text prompt so the model has something to respond to.
-      // The shape comes from Google Live API: realtime_input with text isn't
-      // valid (it expects audio); for text we use client_content.
+      // realtime_input with text isn't valid (it expects audio); for text
+      // we use client_content with turn_complete=true.
       const prompt = {
         client_content: {
           turns: [
@@ -91,39 +96,43 @@ async function once(runIdx) {
         },
       };
       ws.send(JSON.stringify(prompt));
+      tPromptSent = performance.now();
     });
 
     ws.addEventListener("message", (ev) => {
       const now = performance.now();
+      const isBinary = typeof ev.data !== "string";
+      const byteLength = isBinary
+        ? (ev.data?.byteLength ?? ev.data?.length ?? 0)
+        : ev.data.length;
+
       if (tFirstUpstream === null) {
         tFirstUpstream = now;
         if (!args.quiet) {
-          console.log(`  [run ${runIdx}] first upstream message ${ms(tAfterHandshake, now)}`);
+          console.log(
+            `  [run ${runIdx}] first upstream message ${ms(tAfterHandshake, now)} (${isBinary ? "binary" : "text"}, ${byteLength}b)`,
+          );
         }
       }
-      // Heuristic: a server_content message with inline_data audio is our
-      // first audio chunk. We accept both JSON text and Buffer payloads —
-      // Google's Live API typically sends JSON text frames.
-      let parsed = null;
-      try {
-        const raw = typeof ev.data === "string" ? ev.data : Buffer.from(ev.data).toString("utf8");
-        parsed = JSON.parse(raw);
-      } catch {
-        /* binary or non-JSON — ignore for this heuristic */
-      }
-      if (parsed?.serverContent || parsed?.server_content) {
-        const sc = parsed.serverContent ?? parsed.server_content;
-        const hasAudio = JSON.stringify(sc).includes("audio/pcm");
-        if (hasAudio && tFirstAudio === null) {
-          tFirstAudio = now;
-          clearTimeout(timeout);
-          finish({
-            runIdx,
-            handshakeMs: tAfterHandshake - tStart,
-            firstUpstreamMs: tFirstUpstream - tAfterHandshake,
-            timeToFirstAudioMs: now - tAfterHandshake,
-          });
-        }
+      // Live API in v1beta sends protobuf binary frames, not JSON. The
+      // setup_complete ack is small (~26 bytes). The first audio chunk is
+      // huge (50k+ bytes — the full PCM audio for the response start).
+      // Heuristic: first BINARY frame > 5 kB after the prompt = audio.
+      if (
+        tFirstAudio === null &&
+        isBinary &&
+        byteLength > 5_000 &&
+        tPromptSent !== null
+      ) {
+        tFirstAudio = now;
+        clearTimeout(timeout);
+        finish({
+          runIdx,
+          handshakeMs: tAfterHandshake - tStart,
+          firstUpstreamMs: tFirstUpstream - tAfterHandshake,
+          timeToFirstAudioMs: now - tPromptSent,
+          firstAudioBytes: byteLength,
+        });
       }
     });
 
@@ -168,6 +177,8 @@ async function once(runIdx) {
   console.log(`  Text-prompt → first audio chunk (TTFA proxy)`);
   console.log(`    min ${fmt(tofa[0])} | median ${fmt(tofa[Math.floor(tofa.length / 2)])} | max ${fmt(tofa[tofa.length - 1])}`);
   console.log(`\nTarget per brief: <800ms TTFA. Current median: ${fmt(tofa[Math.floor(tofa.length / 2)])}.`);
+  console.log(`Note: text-prompt path adds ~1-2s of TTS warmup that real audio input avoids.`);
+  console.log(`Real-audio TTFA will be measured from the mobile app in Day 2.`);
 })().catch((err) => {
   console.error(err);
   process.exit(1);

@@ -24,10 +24,21 @@ Audio is piped bidirectionally. The Gemini API key never leaves the VPS.
 
 ### 1. Pick the model id
 
-Based on May 2026 verification: `gemini-3.5-flash` (GA May 19). If the GCP
-console shows a different "Live API" model name (e.g. `gemini-3.5-flash-live`
-or `gemini-3.5-flash-native-audio`), prefer that and let me know — we update
-the env accordingly.
+Verified by listing the API key's available models in May 2026: only the
+`gemini-2.5-flash-native-audio-*` family and `gemini-3.1-flash-live-preview`
+support `bidiGenerateContent` (= Live API). `gemini-3.5-flash` exists but
+is text/REST only and is NOT a Live model.
+
+Use:
+
+- `gemini-2.5-flash-native-audio-latest` — rolling alias, picks the
+  newest stable native-audio variant. Best default while we iterate.
+- `gemini-2.5-flash-native-audio-preview-12-2025` — pin this when we
+  reach production and want guarantees about behavior under load.
+- `gemini-3.1-flash-live-preview` — newer generation, still "preview"
+  status. Worth evaluating if 2.5 quality plateaus.
+
+And the API version must be `v1beta` (not `v1alpha`).
 
 ### 2. Put the API key + model on the VPS
 
@@ -43,8 +54,8 @@ Append the following lines (replace with your real key):
 ```
 # --- Google Gemini Live ---
 GEMINI_API_KEY=AIzaSyXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-GEMINI_MODEL=gemini-3.5-flash
-GEMINI_LIVE_WS_URL=wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent
+GEMINI_MODEL=gemini-2.5-flash-native-audio-latest
+GEMINI_LIVE_WS_URL=wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent
 ```
 
 Save and exit.

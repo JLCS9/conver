@@ -116,7 +116,7 @@ export async function POST(request: Request) {
       user_id: user.id,
       started_at: new Date().toISOString(),
       prompt_format: body.promptFormat ?? null,
-      model_used: process.env.GEMINI_MODEL ?? "gemini-3.5-flash",
+      model_used: process.env.GEMINI_MODEL ?? "gemini-2.5-flash-native-audio-latest",
       status: "active",
     })
     .select("id, started_at, prompt_format, model_used, status")
