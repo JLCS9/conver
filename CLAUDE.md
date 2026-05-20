@@ -1,7 +1,7 @@
 # Converflow — Project context for Claude
 
 > Live decisions and project state. Future Claude sessions read this first.
-> Last updated: 2026-05-19 (Week 2 closed).
+> Last updated: 2026-05-20 (Week 3 Day 1 closed — voice loop live).
 
 ## Product
 
@@ -171,3 +171,16 @@ Day 3 — Hard caps + cost tracking server-side. Watchdog + heartbeat. `voice_us
 Day 4 — UX of session screen (orb, live transcript, end button). End-of-session feedback call.
 
 Day 5 — Reconnect logic on WS drop. iOS audio session interruption handling. Tests for streak calc, minute accounting, subscription state. Demo: 5-min session with live transcript + interrupted-by-call recovery.
+
+- 2026-05-19 → 2026-05-20 (Week 3 Day 1): **Voice loop end-to-end working in production.** A mobile client can POST /api/realtime/session, get back a sessionId + WS URL, open WS to wss://api.converflow.tech/voice with Bearer.<clerk_jwt> subprotocol, and the voice-gateway authenticates, looks up the session in Supabase, opens upstream WS to Google Gemini Live, and proxies the bidi audio stream. Latency from Madrid laptop: handshake median 137ms, TTFA median 2356ms (text-prompt path includes ~2s of TTS warmup; real audio-input path should hit the brief's <800ms target — to be measured in Day 2 from the mobile app). 11 commits land plus a handful of in-flight fixes. Decisions and gotchas worth remembering:
+  1. **Live API model is `gemini-2.5-flash-native-audio-latest` on `v1beta`, NOT `gemini-3.5-flash`.** Initial research said `gemini-3.5-flash` was GA for Live API — verified false by listing `/v1beta/models?key=…`: 3.5-flash supports only `generateContent`, not `bidiGenerateContent`. The Live-capable models are the `gemini-2.5-flash-native-audio-*` family and `gemini-3.1-flash-live-preview`. Endpoint URL must be `v1beta` (`v1alpha` works but exposes pre-release surface).
+  2. **Architecture is backend-proxy (Option B).** Mobile opens WS to our voice-gateway, gateway opens upstream WS to Google with the static API key. Mobile never sees Google credentials. The Clerk JWT travels via the `Sec-WebSocket-Protocol: Bearer.<jwt>` subprotocol (React Native WebSocket can set subprotocols but not arbitrary headers). Hard caps and cost tracking become enforceable server-side; Pipecat migration in Mes 3-4 only swaps the upstream connection inside voice-gateway, not the mobile pipeline.
+  3. **Audio over the wire is protobuf binary**, not JSON-with-base64. Setup ACK is a 26-byte binary frame, first audio chunk is ~60 KB binary, then a stream of ~2.8 KB binary frames. The voice-gateway forwards them verbatim; the client decodes PCM and plays. Latency-measurement scripts had to be updated for binary frames.
+  4. **voice-gateway runs in a separate Docker service** (`voice-gateway/` directory), Node 22 + `ws` + `@clerk/backend` + `@supabase/supabase-js` + `pino`. Shares `backend/.env.local` via `env_file:` in compose; PORT is overridden to 8083 via compose `environment:` because the shared env_file carries PORT=3000 for the Next.js backend.
+  5. **Bugs caught and fixed during deploy:**
+     - `voice-gateway` container restart-looped on first deploy because `GEMINI_API_KEY` was missing from `/opt/converflow/backend/.env.local`. zod env validation correctly refused to boot; operator had to add the key + recreate.
+     - `voice-gateway` listened on container port 3000 instead of 8083 because of PORT collision with backend in the shared env_file. Fixed by adding `environment: { PORT: 8083 }` override in compose.
+     - The nginx vhost copy-over erased certbot's :443 block, returning a hostname-mismatched `converflow.ai` cert on `api.converflow.tech` requests. Recovered with `certbot --nginx --reinstall`. Template now includes both :80 and :443 blocks with stable cert paths so future copy-overs preserve SSL.
+     - The deployed nginx vhost lacked the `/voice` location (template change had never been copied), so WS upgrades silently routed to the Next.js backend and hung.
+  6. **Cost economics confirmed reasonable.** Public Gemini pricing at `gemini-3.5-flash` tier (which is also the price tier for 2.5-flash-native-audio): $0.25/M input audio tokens, $0.75/M output. At ~32 tokens/sec, a 10-min session is ~$0.01. Premium €9.99/mo with 30 sessions/mo → $0.30 IA cost → ~97% gross margin. Free tier 5 min/day → ~$0.15/user/mo subsidy. Context caching reduces another 30-40%.
+  7. **The TTFA target needs revisiting.** Brief says <800ms TTFA. Text-prompt path measured 2.4s but includes TTS warmup. Real audio-input path is theoretically faster (model stays in audio domain end-to-end). Day 2 measurement from the mobile app with real PCM input will tell us if 800ms is achievable on Gemini Live from Madrid or if we need to negotiate the number down/move to Pipecat sooner.
