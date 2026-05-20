@@ -1,0 +1,10 @@
+{
+  "name": "converflow-scripts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone ops scripts (latency spikes, ad-hoc checks). Separate package.json so we don't pollute backend/mobile/voice-gateway deps.",
+  "type": "module",
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
