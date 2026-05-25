@@ -43,22 +43,11 @@ const httpServer = createServer((req, res) => {
   res.end(JSON.stringify({ error: "not_found" }));
 });
 
-// We MUST echo back the client's subprotocol or some WebSocket
-// implementations (notably React Native's iOS WebSocket / NSURLSessionWebSocketTask)
-// will close the connection right after the 101 handshake with no useful
-// error code — close code 0 in RN. The client opens with
-// `Sec-WebSocket-Protocol: Bearer.<jwt>`; we accept that exact string.
-const wss = new WebSocketServer({
-  noServer: true,
-  handleProtocols: (protocols) => {
-    for (const p of protocols) {
-      if (typeof p === "string" && p.startsWith("Bearer.")) {
-        return p;
-      }
-    }
-    return false; // reject if no Bearer.* offered
-  },
-});
+// No subprotocol negotiation — auth travels as a `?token=` query param
+// instead. React Native's iOS WebSocket has a long history of buggy
+// subprotocol handling over WSS; query-param auth sidesteps it entirely
+// and is easier to debug from nginx access logs.
+const wss = new WebSocketServer({ noServer: true });
 
 function rejectSocket(socket: NodeJS.WritableStream, status: number, reason: string) {
   socket.write(
@@ -81,9 +70,15 @@ httpServer.on("upgrade", (request, socket, head) => {
     return;
   }
 
-  const bearer = extractBearerFromSubprotocol(
-    request.headers["sec-websocket-protocol"],
-  );
+  // Auth: ?token=<clerk_jwt> in the WS URL. See realtimeClient.ts in
+  // the mobile app for the why behind query-param instead of subprotocol.
+  // Fallback to the legacy Bearer.<jwt> subprotocol so older clients
+  // keep working during a rolling app update.
+  const bearer =
+    url.searchParams.get("token") ??
+    extractBearerFromSubprotocol(
+      request.headers["sec-websocket-protocol"],
+    );
   if (!bearer) {
     rejectSocket(socket, 401, "Unauthorized");
     return;

@@ -53,10 +53,20 @@ export class RealtimeClient {
     }
     return new Promise((resolve, reject) => {
       this.setStatus("connecting");
-      console.log(`[ws] connecting to ${this.opts.wsUrl}`);
-      // React Native WebSocket accepts subprotocols as second arg. Our
-      // gateway looks for "Bearer.<jwt>" in Sec-WebSocket-Protocol.
-      const ws = new WebSocket(this.opts.wsUrl, [`Bearer.${this.opts.bearer}`]);
+      // Pass the JWT via `?token=` query param instead of the
+      // Sec-WebSocket-Protocol subprotocol. React Native's iOS
+      // implementation (NSURLSessionWebSocketTask) has shipped buggy
+      // subprotocol negotiation across multiple iOS versions and closes
+      // wss connections with code 0 before the handshake completes.
+      // Query-param auth works on every WS client and is debuggable in
+      // nginx access logs. The token is short-lived (~60s Clerk JWT)
+      // and carried over TLS, so the log-exposure tradeoff is acceptable
+      // for the MVP. We can revisit with a dedicated WS auth scheme
+      // (e.g. signed short-lived gateway tokens) post-launch.
+      const sep = this.opts.wsUrl.includes("?") ? "&" : "?";
+      const authedUrl = `${this.opts.wsUrl}${sep}token=${encodeURIComponent(this.opts.bearer)}`;
+      console.log(`[ws] connecting to ${this.opts.wsUrl} (auth via ?token=)`);
+      const ws = new WebSocket(authedUrl);
       this.ws = ws;
 
       // Timeout so a stuck handshake doesn't leave the UI frozen.
