@@ -1,7 +1,7 @@
 # Converflow — Project context for Claude
 
 > Live decisions and project state. Future Claude sessions read this first.
-> Last updated: 2026-05-25 (Week 3 Day 3 — bug confirmed in SDK 51, SDK 56 fixes it).
+> Last updated: 2026-05-25 (Week 3 Day 3 closed — WS open end-to-end on SDK 56).
 
 ## Product
 
@@ -226,3 +226,34 @@ Day 5 — Reconnect logic on WS drop. iOS audio session interruption handling. T
   Steps: bump SDK version in `mobile/package.json` + run `npx expo install --check` to align all expo-* deps; for non-expo packages do one-by-one compat verification; delete `ios/` and let prebuild regenerate; clear pods cache; `npx expo run:ios`; iterate on runtime errors; remove the SDK-51 hacks (NativeWind pin, audio-stream legacy package) as their reasons disappear.
 
   Once the upgrade is in, the WS work that was blocked on Day 2 should just work — `useVoiceSession.start()` will get to `step 3 done` and beyond, the voice-gateway will start seeing connections from the mobile, and we can finally measure real-audio TTFA from the sim.
+- 2026-05-25 (Day 3 closed): **SDK 56 upgrade landed and voice WS now opens end-to-end from the mobile app.** Two commits: `8692bf0` (Expo 51→56, RN 0.74→0.85, React 18→19, Reanimated 3→4, NativeWind 4.1→4.2 unpinned, @siteed/expo-audio-stream@1.16 → @siteed/audio-studio@3.2, expo-av removed, expo-audio added, expo-notifications `allowAnnouncements` dropped) and `74504de` (voice session UI rewritten with inline styles, useAudioRecorder removed, diagnostic buttons removed). Also bumped local Node to 26 via brew (SDK 56's CLI requires `node:util.parseEnv` from Node ≥20.19).
+
+  **Root cause of the Day-2 WebSocket bug, definitively identified:** `@siteed/audio-studio`'s `useAudioRecorder()` hook installs an iOS recording-interruption listener at mount that breaks `NSURLSessionWebSocketTask`. We proved this with three diagnostic buttons (raw WS to fake URL → 1006 + reason "401", real-auth WS without the hook → open + clean 1000 close, full voice flow with the hook → code=0 silent failure). Removing the hook fixed the WS instantly. **Not a platform bug, not in our infra, not Clerk JWT length, not subprotocols, not HTTP/2 — strictly an interaction between audio-studio's native interrupt listener and iOS NSURLSession on SDK 56 + iOS 26.5 Sim.**
+
+  **What works as of end-of-Day-3:**
+  - POST /api/realtime/session → returns sessionId + wsUrl in ~250ms.
+  - WS opens against `wss://api.converflow.tech/voice?sessionId=…&token=<clerk_jwt>` (~350-400ms).
+  - voice-gateway authenticates the JWT, looks up the session in Supabase, opens upstream WS to Google Gemini Live, sends the setup message with the system prompt, response_modalities, and transcription toggles.
+  - Google's `setup_complete` ack lands at the mobile through the proxy (visible as `chunksReceived: 1` ticking in the session screen metrics).
+  - iOS audio session configured for `PlayAndRecord` + `VoiceChat` via expo-audio's `setAudioModeAsync`.
+  - Lifecycle clean: session row marked completed with real duration when the WS closes.
+
+  **What's parked, in priority order for Day 4:**
+  1. **Mic capture replacement.** Swap `@siteed/audio-studio`'s useAudioRecorder for expo-audio's recorder API (we already have expo-audio installed). Validate that expo-audio's hook does NOT install the same iOS interrupt listener that breaks WS. If it does, the next options are: a custom Expo module via expo-modules-api, `react-native-audio-api` from Software Mansion now that we have Reanimated 4 + worklets installed, or a native CMakeLists shim around AVAudioRecorder that explicitly does NOT register interruption observers.
+  2. **Audio playback of Google's responses.** Frames come over as protobuf binary on `v1beta`. Decode in the voice-gateway (Node `protobufjs` + the `BidiGenerateContentServerMessage` schema from the Google AI Studio docs), extract the PCM bytes from `serverContent.modelTurn.parts[*].inlineData.data`, and forward just the raw PCM to the mobile client as binary WS frames. Mobile plays them via expo-audio's `AudioPlayer` with a buffer-feeding pattern (or react-native-audio-api once we adopt it).
+  3. **NativeWind text styling on SDK 56.** Buttons with `bg-*` classes render fine but `text-*` and layout classes (flex-1, justify-between) are not being applied. Probably needs a babel preset adjustment for the new react-native-css-interop + Reanimated 4 + worklets stack. Cosmetic for now — `(app)/session.tsx` uses inline StyleSheet and works fine; the rest of the app (auth, onboarding, home) still uses NativeWind and will be invisible-text until this is fixed. Triage at start of Day 4 before touching more screens.
+  4. **Real TTFA measurement with audio input.** Blocked on (1). Target from the brief is <800ms; text-prompt path measured 2.4s including TTS warmup, real audio path should be faster. Need a real number before we lock product UX.
+
+  **Diagnostics still in the code** (kept on purpose for Day 4 debugging — they're cheap and useful):
+  - `[voice] step N` logs in `useVoiceSession.ts` — let you trace exactly where a start attempt hangs/fails.
+  - `[ws] connecting / open / closed / error` logs in `realtimeClient.ts`.
+  - `[api] → METHOD path` + `[api] ← METHOD path → HTTP status in Xms` timing in `src/lib/api.ts`.
+  - 15-second AbortController timeout on all api() calls; 12-second timeout on WS open.
+  These also caught the /api/me infinite-loop bug from Day 2 (843 calls in <2min) where getToken was in a useEffect dep array.
+
+  **Things to remember for next session:**
+  - Prefix npm/npx with `PATH=/opt/homebrew/bin:$PATH` so SDK 56's CLI (Node ≥20.19 required) picks up Node 26 from brew instead of the system's Node 20.11.
+  - The voice-gateway on the VPS is current as of `9e5b615` (token query-param + handleProtocols fallback). Nothing about the SDK upgrade needs a backend redeploy unless we change the audio frame format.
+  - Disk space gets very tight during rebuilds — keep an eye on `df -h /System/Volumes/Data`. `~/.cache` carries 4-5 GB of HuggingFace models from another project; do NOT delete. Safe to nuke: `mobile/ios/`, `mobile/node_modules/`, `~/Library/Developer/Xcode/DerivedData/`, `~/.npm` cache.
+  - Two diagnostic scripts in `scripts/` paid for themselves and stay: `probe-gemini-models.mjs` (list Live-capable models for an API key) and `probe-gemini-direct.mjs` (raw WS to Google bypassing our gateway).
+  - Local Metro start: `cd mobile && PATH=/opt/homebrew/bin:$PATH npx expo start --dev-client`. iOS app icon name: "Converflow". Bundle id: `ai.converflow.app`. Already installed in the booted iPhone 17 Pro / iOS 26.5 simulator from the SDK-56 rebuild.
