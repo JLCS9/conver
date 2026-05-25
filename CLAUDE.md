@@ -1,7 +1,7 @@
 # Converflow — Project context for Claude
 
 > Live decisions and project state. Future Claude sessions read this first.
-> Last updated: 2026-05-25 (Week 3 Day 2 BLOCKED — RN WebSocket vs iOS 26.5 Sim).
+> Last updated: 2026-05-25 (Week 3 Day 3 — bug confirmed in SDK 51, SDK 56 fixes it).
 
 ## Product
 
@@ -205,3 +205,24 @@ Day 5 — Reconnect logic on WS drop. iOS audio session interruption handling. T
   4. **Worst case: write an HTTP-polling shim** for the Day-2 spike to get a TTFA number on the wire. Awful UX but proves the rest of the stack and unblocks downstream work while we figure out the real WS path. Don't ship this — replace it with proper WS before TestFlight.
 
   Diagnostics that are useful to keep: `[ws] connecting`, `[voice] step N done`, `[api] ← METHOD path → HTTP status in Xms` logs are still in the code — they earn their keep until we ship.
+- 2026-05-25 (Week 3 Day 3 — bug location confirmed): **Minimal repro proved the bug is RN 0.74.5 / SDK 51 + iOS 26.5 Sim, not our app.** Built a 30-line Expo SDK 56 project (`/tmp/ws-repro`, now deleted), ran the exact same `new WebSocket('wss://api.converflow.tech/voice?sessionId=test&token=fake')` against the same iOS 26.5 Sim through Expo Go. Result was clean:
+
+  ```
+  [ws-repro:info]  connecting → wss://api.converflow.tech/voice?...&token=fake
+  [ws-repro:error] +397ms unknown
+  [ws-repro:close] +398ms code=1006 reason="Received bad response code from server: 401." wasClean=false
+  ```
+
+  WS reaches the server in ~400ms, server returns HTTP 401 on the fake token (as designed), and RN reports a real close code + a real reason. Compare to our SDK-51 app where the same connection closes with `code=0 reason=""` and never touches CFNetwork at all. **The bug is in the SDK 51 SocketRocket-based WebSocket implementation on iOS 26.5 Sim.** SDK 56's NSURLSessionWebSocketTask-based implementation works.
+
+  **Decision: upgrade Converflow mobile from SDK 51 → SDK 56.** Risk surface:
+  - `nativewind@4.1.23` pinned to dodge `react-native-worklets/plugin` (which required Reanimated 4). With SDK 56 carrying Reanimated 4 by default, the pin can be lifted to NativeWind 4.2.x.
+  - `@siteed/expo-audio-stream@1.16.0` was the legacy-named install we used because newer audio-studio required Expo >=52. Now we can migrate to the canonical `@siteed/audio-studio@3.x`.
+  - `@clerk/clerk-expo@2` → may need to bump for RN 0.85 compat.
+  - `expo-router@~3.5`, `expo-notifications@~0.28`, `expo-secure-store@~13`, `@react-native-community/datetimepicker@8.0.1`, `expo-web-browser@~13`, `expo-auth-session@~5.5`, `expo-av@~14` → all need SDK 56 versions.
+  - `eas.json` development profile may need an update.
+  - The native rebuild will take ~10-30 min and ~3-5 GB. Free disk before starting (delete `mobile/ios/`, `mobile/node_modules/`, Xcode `DerivedData/` for this project).
+
+  Steps: bump SDK version in `mobile/package.json` + run `npx expo install --check` to align all expo-* deps; for non-expo packages do one-by-one compat verification; delete `ios/` and let prebuild regenerate; clear pods cache; `npx expo run:ios`; iterate on runtime errors; remove the SDK-51 hacks (NativeWind pin, audio-stream legacy package) as their reasons disappear.
+
+  Once the upgrade is in, the WS work that was blocked on Day 2 should just work — `useVoiceSession.start()` will get to `step 3 done` and beyond, the voice-gateway will start seeing connections from the mobile, and we can finally measure real-audio TTFA from the sim.
