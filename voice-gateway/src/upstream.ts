@@ -102,35 +102,31 @@ export function openUpstream(
       // `voice_name: "Aoede"` is a Google-preset English female voice
       // that works well at conversational pace. Other native-audio
       // voices to evaluate later: Puck, Kore, Charon, Fenrir, Leda.
-      // Day-4 audit findings baked in:
+      // Day-4 audit findings baked in — SAFE SUBSET version.
       //
-      // 1) `temperature: 0.6` — default ~1.0 was letting the native-audio
-      //    model invent user statements. 0.6 is the sweet spot for an
-      //    instruction-following tutor (still natural, much less drift).
-      //    `top_p: 0.85` adds a complementary cap on token sampling.
+      // First version of this fix (commit c9c86ea) added several fields
+      // from Google's most recent Live API docs (`media_resolution`,
+      // `proactivity`, `enable_affective_dialog`, VAD sensitivity enums,
+      // `activity_handling`, `turn_coverage`). User reported the loop
+      // went silent after deploy — strongly suggests Gemini's v1beta
+      // endpoint rejected the setup on one of those experimental fields
+      // (no setupComplete arrives → no audio flows in either direction).
       //
-      // 2) `automatic_activity_detection` with LOW sensitivity +
-      //    `silence_duration_ms: 1200` — defaults fired too eagerly,
-      //    interpreting any breath as "user speaking", which cut model
-      //    turns short and triggered the hallucination cycle.
-      //
-      // 3) `activity_handling: NO_INTERRUPTION` — explicitly tell the
-      //    server NOT to barge into model turns. Cleaner conversation.
-      //
-      // 4) `proactive_audio: false` — we never want Gemini speaking
-      //    spontaneously; turns must be triggered by real user audio.
-      //
-      // 5) `media_resolution: MEDIA_RESOLUTION_LOW` — audio-only, so the
-      //    visual budget is wasted. ~30% fewer tokens billed.
+      // Rolling back to a minimal proven-safe config that still addresses
+      // the hallucination root cause:
+      //   - `temperature: 0.6` is universal generation_config, safe.
+      //   - System prompt rewrite (DAY1_SYSTEM_INSTRUCTION) does most of
+      //     the heavy lifting against hallucination on its own — it
+      //     explicitly tells the model not to guess.
+      // Everything else is left at Gemini's default to avoid the silent
+      // setup rejection. We'll add the VAD/proactivity tuning back one
+      // field at a time once we know which one was rejected.
       const setupMessage = {
         setup: {
           model: model.startsWith("models/") ? model : `models/${model}`,
           generation_config: {
             response_modalities: ["AUDIO"],
             temperature: 0.6,
-            top_p: 0.85,
-            candidate_count: 1,
-            media_resolution: "MEDIA_RESOLUTION_LOW",
             speech_config: {
               language_code: "en-US",
               voice_config: {
@@ -141,21 +137,12 @@ export function openUpstream(
           system_instruction: {
             parts: [{ text: DAY1_SYSTEM_INSTRUCTION }],
           },
-          // Server-side voice activity detection — Google manages turn
-          // boundaries. Cheaper + more reliable than client VAD.
+          // Server-side voice activity detection — defaults. We left the
+          // tuning out for now; the system prompt is the primary lever
+          // against hallucination.
           realtime_input_config: {
-            automatic_activity_detection: {
-              disabled: false,
-              start_of_speech_sensitivity: "START_SENSITIVITY_LOW",
-              end_of_speech_sensitivity: "END_SENSITIVITY_LOW",
-              prefix_padding_ms: 200,
-              silence_duration_ms: 1200,
-            },
-            activity_handling: "NO_INTERRUPTION",
-            turn_coverage: "TURN_INCLUDES_ONLY_ACTIVITY",
+            automatic_activity_detection: {},
           },
-          proactivity: { proactive_audio: false },
-          enable_affective_dialog: false,
           // Ask the upstream to also send the user's transcribed audio
           // back as text — the client renders this live above the orb.
           input_audio_transcription: {},
