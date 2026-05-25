@@ -1,4 +1,5 @@
 import { useAuth, useUser } from "@clerk/clerk-expo";
+import { useRouter } from "expo-router";
 import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
@@ -24,6 +25,7 @@ type MeResponse = {
 export default function Home() {
   const { signOut, getToken } = useAuth();
   const { user } = useUser();
+  const router = useRouter();
   const [me, setMe] = useState<MeResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -80,6 +82,13 @@ export default function Home() {
           </>
         ) : null}
 
+        <Pressable
+          style={s.primaryButton}
+          onPress={() => router.push("/(app)/session")}
+        >
+          <Text style={s.primaryButtonText}>Empezar sesión de voz</Text>
+        </Pressable>
+
         <Pressable style={s.button} onPress={() => signOut()}>
           <Text style={s.buttonText}>Cerrar sesión</Text>
         </Pressable>
@@ -109,12 +118,20 @@ const s = StyleSheet.create({
     borderRadius: 8,
   },
   err: { color: "#b91c1c", fontSize: 14 },
+  primaryButton: {
+    backgroundColor: "#0EA5E9",
+    padding: 16,
+    borderRadius: 12,
+    alignItems: "center",
+    marginTop: 24,
+  },
+  primaryButtonText: { color: "#fff", fontSize: 17, fontWeight: "700" },
   button: {
     backgroundColor: "#111",
     padding: 14,
     borderRadius: 10,
     alignItems: "center",
-    marginTop: 24,
+    marginTop: 12,
   },
   buttonText: { color: "#fff", fontSize: 16, fontWeight: "600" },
 });
