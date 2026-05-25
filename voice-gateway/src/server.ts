@@ -43,7 +43,22 @@ const httpServer = createServer((req, res) => {
   res.end(JSON.stringify({ error: "not_found" }));
 });
 
-const wss = new WebSocketServer({ noServer: true });
+// We MUST echo back the client's subprotocol or some WebSocket
+// implementations (notably React Native's iOS WebSocket / NSURLSessionWebSocketTask)
+// will close the connection right after the 101 handshake with no useful
+// error code — close code 0 in RN. The client opens with
+// `Sec-WebSocket-Protocol: Bearer.<jwt>`; we accept that exact string.
+const wss = new WebSocketServer({
+  noServer: true,
+  handleProtocols: (protocols) => {
+    for (const p of protocols) {
+      if (typeof p === "string" && p.startsWith("Bearer.")) {
+        return p;
+      }
+    }
+    return false; // reject if no Bearer.* offered
+  },
+});
 
 function rejectSocket(socket: NodeJS.WritableStream, status: number, reason: string) {
   socket.write(

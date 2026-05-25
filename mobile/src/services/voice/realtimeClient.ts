@@ -47,31 +47,61 @@ export class RealtimeClient {
     this.opts.onStatus?.(s);
   }
 
-  open(): Promise<void> {
+  open(timeoutMs = 12_000): Promise<void> {
     if (this.status !== "idle") {
       return Promise.reject(new Error(`RealtimeClient already in status=${this.status}`));
     }
     return new Promise((resolve, reject) => {
       this.setStatus("connecting");
+      console.log(`[ws] connecting to ${this.opts.wsUrl}`);
       // React Native WebSocket accepts subprotocols as second arg. Our
       // gateway looks for "Bearer.<jwt>" in Sec-WebSocket-Protocol.
       const ws = new WebSocket(this.opts.wsUrl, [`Bearer.${this.opts.bearer}`]);
       this.ws = ws;
 
+      // Timeout so a stuck handshake doesn't leave the UI frozen.
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        console.warn(`[ws] open timeout after ${timeoutMs}ms — closing`);
+        try { ws.close(); } catch { /* ignore */ }
+        this.setStatus("errored");
+        reject(new Error(`WS open timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+
       ws.onopen = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        console.log("[ws] open");
         this.setStatus("open");
         resolve();
       };
       ws.onerror = (event) => {
-        this.opts.onError?.((event as { message?: string }).message ?? event);
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const msg = (event as { message?: string }).message ?? "unknown";
+        console.warn(`[ws] error before open: ${msg}`);
+        this.opts.onError?.(msg);
         this.setStatus("errored");
-        reject(new Error(`WS error: ${(event as { message?: string }).message ?? "unknown"}`));
+        reject(new Error(`WS error: ${msg}`));
       };
       ws.onclose = (event) => {
+        const code = event?.code;
+        const reason = event?.reason ?? "";
+        console.log(`[ws] closed code=${code} reason="${reason}"`);
         this.setStatus("closed");
-        // expo/react-native WS close event has code + reason
-        if (event?.code && event.code !== 1000) {
-          this.opts.onError?.(new Error(`WS closed with code ${event.code}: ${event.reason ?? ""}`));
+        if (!settled) {
+          // Closed before open succeeded — surface it as a rejection.
+          settled = true;
+          clearTimeout(timer);
+          reject(new Error(`WS closed before open (code ${code}): ${reason}`));
+          return;
+        }
+        if (code && code !== 1000) {
+          this.opts.onError?.(new Error(`WS closed with code ${code}: ${reason}`));
         }
       };
       ws.onmessage = (event) => {

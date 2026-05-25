@@ -114,6 +114,7 @@ export function useVoiceSession(): UseVoiceSessionResult {
   );
 
   const start = useCallback(async () => {
+    console.log("[voice] start() called, current phase=", phase);
     if (phase !== "idle" && phase !== "ended" && phase !== "error") return;
 
     setError(null);
@@ -124,10 +125,12 @@ export function useVoiceSession(): UseVoiceSessionResult {
 
     try {
       // 1. Handshake — get sessionId + wsUrl from our backend.
+      console.log("[voice] step 1: POST /api/realtime/session...");
       const session = await api<RealtimeSessionResponse>(
         "/api/realtime/session",
         { method: "POST", body: JSON.stringify({}), getToken },
       );
+      console.log("[voice] step 1 done, sessionId=", session.sessionId.slice(0, 8), "wsUrl=", session.wsUrl);
       setMetadata({
         sessionId: session.sessionId,
         wsUrl: session.wsUrl,
@@ -136,10 +139,13 @@ export function useVoiceSession(): UseVoiceSessionResult {
       });
 
       // 2. Clerk JWT for the WS auth.
+      console.log("[voice] step 2: getToken for WS bearer...");
       const bearer = await getToken();
       if (!bearer) throw new Error("Clerk getToken returned null");
+      console.log("[voice] step 2 done, bearer len=", bearer.length);
 
       // 3. Open the WS.
+      console.log("[voice] step 3: opening WS...");
       const client = new RealtimeClient({
         wsUrl: session.wsUrl,
         bearer,
@@ -173,15 +179,20 @@ export function useVoiceSession(): UseVoiceSessionResult {
       });
       clientRef.current = client;
       await client.open();
+      console.log("[voice] step 3 done, WS open");
 
       // 4. Audio session.
+      console.log("[voice] step 4: configureForVoiceSession...");
       await configureForVoiceSession();
+      console.log("[voice] step 4 done");
 
       // 5. Start mic capture.
+      console.log("[voice] step 5: recorder.startRecording...");
       await recorder.startRecording({
         ...GEMINI_RECORDING_CONFIG,
         onAudioStream: handleAudioStream,
       });
+      console.log("[voice] step 5 done — going live");
 
       setPhase("live");
     } catch (e) {

@@ -58,7 +58,12 @@ export default function Index() {
     return () => {
       cancelled = true;
     };
-  }, [isLoaded, isSignedIn, getToken]);
+    // getToken is intentionally NOT in deps: Clerk re-creates the function
+    // reference on every render, which would re-run this effect after every
+    // setState (we saw 843 /api/me calls in <2 minutes before this fix).
+    // The captured getToken closure still mints fresh JWTs internally.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoaded, isSignedIn]);
 
   if (!destination) {
     return (

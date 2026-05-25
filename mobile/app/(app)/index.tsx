@@ -50,7 +50,10 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [getToken]);
+    // getToken intentionally excluded — Clerk recreates the function each
+    // render and would trigger an infinite /api/me loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   if (loading) {
     return (
