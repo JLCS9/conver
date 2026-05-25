@@ -24,10 +24,7 @@ import {
   configureForVoiceSession,
   releaseAudioSession,
 } from "@/src/services/voice/audioSession";
-import {
-  type GeminiServerMessage,
-  RealtimeClient,
-} from "@/src/services/voice/realtimeClient";
+import { RealtimeClient } from "@/src/services/voice/realtimeClient";
 
 type Phase = "idle" | "starting" | "live" | "stopping" | "ended" | "error";
 
@@ -188,7 +185,11 @@ export function useVoiceSession(): UseVoiceSessionResult {
           // device this filter passes English through cleanly.
           if (sc.inputTranscription?.text) {
             const delta = sc.inputTranscription.text;
-            if (isLikelyMeaningfulEnglish(delta)) {
+            const kept = isLikelyMeaningfulEnglish(delta);
+            console.log(
+              `[transcript] user${kept ? "" : " (filtered)"}: ${JSON.stringify(delta)}`,
+            );
+            if (kept) {
               setTranscripts((t) => ({ ...t, user: t.user + delta }));
             }
           }
@@ -196,6 +197,7 @@ export function useVoiceSession(): UseVoiceSessionResult {
           // language_code: en-US + system instruction).
           if (sc.outputTranscription?.text) {
             const delta = sc.outputTranscription.text;
+            console.log(`[transcript] model: ${JSON.stringify(delta)}`);
             setTranscripts((t) => ({ ...t, model: t.model + delta }));
           }
 

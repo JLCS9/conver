@@ -20,8 +20,29 @@ export const dynamic = "force-dynamic";
 // Hard limits — also enforced server-side by the voice-gateway. The
 // client gets these values so it can show a countdown and close itself
 // gracefully a few seconds before the gateway kills the WS.
-const MAX_SESSION_DURATION_SECONDS = 720; // 12 min absolute cap per session
-const FREE_TIER_DAILY_LIMIT_SECONDS = 300; // 5 min/day
+//
+// Both are env-overridable so we can bump them for dev/staging without
+// a code change. Defaults are the free-tier production values.
+//   - MAX_SESSION_DURATION_SECONDS: hard ceiling per *single* session
+//   - FREE_TIER_DAILY_LIMIT_SECONDS: rolling total across all sessions
+//     for a UTC day. Hit it and you get HTTP 402 with paywall:true.
+// To bump in dev: set in /opt/converflow/backend/.env.local then
+// `docker compose up -d backend` (no rebuild needed; env_file is read
+// at container start).
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+const MAX_SESSION_DURATION_SECONDS = envInt(
+  "MAX_SESSION_DURATION_SECONDS",
+  720, // 12 min
+);
+const FREE_TIER_DAILY_LIMIT_SECONDS = envInt(
+  "FREE_TIER_DAILY_LIMIT_SECONDS",
+  300, // 5 min/day
+);
 
 function startOfTodayIso(): string {
   // We treat "today" in UTC for the cap reset. Local timezones drift the

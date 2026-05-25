@@ -189,11 +189,31 @@ wss.on("connection", async (clientWs, request) => {
     }
   });
 
-  clientWs.on("close", () => {
-    void finalize("client_close");
+  clientWs.on("close", (code, reason) => {
+    // Client close with code 1000 = clean ("user tapped Stop"); anything
+    // else = abnormal (network drop, app crashed). Map to the right
+    // analytics outcome so dashboards don't lie.
+    if (code === 1000) {
+      void finalize("client_close");
+    } else {
+      void finalize(
+        "error",
+        new Error(`client closed abnormally: code=${code} reason=${reason?.toString() ?? ""}`),
+      );
+    }
   });
-  upstreamWs.on("close", () => {
-    void finalize("upstream_close");
+  upstreamWs.on("close", (code, reason) => {
+    // Upstream close with code 1000 = Gemini decided the session is over
+    // (e.g., max duration hit, model side completion). Anything else =
+    // Gemini error: rate limit, model unavailable, server bounce.
+    if (code === 1000) {
+      void finalize("upstream_close");
+    } else {
+      void finalize(
+        "error",
+        new Error(`upstream closed abnormally: code=${code} reason=${reason?.toString() ?? ""}`),
+      );
+    }
   });
 
   clientWs.on("error", (err) => {

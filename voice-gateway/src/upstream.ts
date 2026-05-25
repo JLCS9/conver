@@ -17,27 +17,34 @@ import { logger } from "./logger.js";
 
 const env = loadEnv();
 
-// Hardcoded Day-1 system prompt. Phrased to keep the model in
-// "English conversation tutor for a hispanophone developer" mode.
-// We'll move this to a prompts/ table in Week 5 when prompt rotation lands.
+// Day-4 system prompt — rewritten after the Day-4 hallucination report.
+// The previous version told the model to "fill silences with follow-up
+// questions" which, combined with the default high temperature, caused
+// Gemini's native-audio model to invent user turns on unclear audio
+// (e.g. responding to a silent simulator with "Sounds like you were
+// busy!"). We're now explicit that unclear audio must trigger a clarify
+// request, never a guess. We'll move this to a prompts/ table in
+// Week 5 when prompt rotation lands.
 const DAY1_SYSTEM_INSTRUCTION = `
-You are a friendly English conversation tutor for a Spanish-speaking
-software developer (your "student"). The student wants to practise
-spoken English in short daily sessions.
+You are an English conversation tutor for a Spanish-speaking software
+developer. Speak only English, in short natural turns of 1-2 sentences.
 
-Rules:
-- Always speak English. If the student switches to Spanish for a phrase
-  they don't know, gently model the English version and continue in
-  English.
-- Keep your turns short and natural (1-3 sentences). This is a
-  conversation, not a monologue.
-- Don't lecture. Don't correct every mistake. Pick at most one thing
-  per turn to gently reformulate.
-- Stay on tech-adjacent topics by default (their day at work, a
-  technology they used recently, a small career question). The student
-  may steer to other topics — follow them.
-- If the student goes silent for a few seconds, ask a short follow-up
-  question to keep the conversation alive.
+CRITICAL — handling unclear audio:
+- Only respond to words you clearly heard the student say. Never paraphrase,
+  summarise, or assume what the student "probably" said.
+- If the student's audio is unclear, garbled, partial, or you are not
+  confident what they said, ask them to repeat: "Sorry, could you say that
+  again?" Do not guess.
+- If the student says nothing or only a brief acknowledgement ("hi",
+  "yeah", "ok"), respond to exactly that — do not invent context they did
+  not provide (e.g. do not assume their day was busy unless they said so).
+- If there is silence, stay quiet. Do not fill gaps with follow-ups.
+
+Style:
+- Don't lecture. Reformulate at most one small error per turn, gently.
+- Stay on tech-adjacent topics by default; follow the student if they steer.
+- If the student uses a Spanish word, model the English version once and
+  continue in English.
 `.trim();
 
 export interface OpenUpstreamOptions {
@@ -95,11 +102,35 @@ export function openUpstream(
       // `voice_name: "Aoede"` is a Google-preset English female voice
       // that works well at conversational pace. Other native-audio
       // voices to evaluate later: Puck, Kore, Charon, Fenrir, Leda.
+      // Day-4 audit findings baked in:
+      //
+      // 1) `temperature: 0.6` — default ~1.0 was letting the native-audio
+      //    model invent user statements. 0.6 is the sweet spot for an
+      //    instruction-following tutor (still natural, much less drift).
+      //    `top_p: 0.85` adds a complementary cap on token sampling.
+      //
+      // 2) `automatic_activity_detection` with LOW sensitivity +
+      //    `silence_duration_ms: 1200` — defaults fired too eagerly,
+      //    interpreting any breath as "user speaking", which cut model
+      //    turns short and triggered the hallucination cycle.
+      //
+      // 3) `activity_handling: NO_INTERRUPTION` — explicitly tell the
+      //    server NOT to barge into model turns. Cleaner conversation.
+      //
+      // 4) `proactive_audio: false` — we never want Gemini speaking
+      //    spontaneously; turns must be triggered by real user audio.
+      //
+      // 5) `media_resolution: MEDIA_RESOLUTION_LOW` — audio-only, so the
+      //    visual budget is wasted. ~30% fewer tokens billed.
       const setupMessage = {
         setup: {
           model: model.startsWith("models/") ? model : `models/${model}`,
           generation_config: {
             response_modalities: ["AUDIO"],
+            temperature: 0.6,
+            top_p: 0.85,
+            candidate_count: 1,
+            media_resolution: "MEDIA_RESOLUTION_LOW",
             speech_config: {
               language_code: "en-US",
               voice_config: {
@@ -113,8 +144,18 @@ export function openUpstream(
           // Server-side voice activity detection — Google manages turn
           // boundaries. Cheaper + more reliable than client VAD.
           realtime_input_config: {
-            automatic_activity_detection: {},
+            automatic_activity_detection: {
+              disabled: false,
+              start_of_speech_sensitivity: "START_SENSITIVITY_LOW",
+              end_of_speech_sensitivity: "END_SENSITIVITY_LOW",
+              prefix_padding_ms: 200,
+              silence_duration_ms: 1200,
+            },
+            activity_handling: "NO_INTERRUPTION",
+            turn_coverage: "TURN_INCLUDES_ONLY_ACTIVITY",
           },
+          proactivity: { proactive_audio: false },
+          enable_affective_dialog: false,
           // Ask the upstream to also send the user's transcribed audio
           // back as text — the client renders this live above the orb.
           input_audio_transcription: {},

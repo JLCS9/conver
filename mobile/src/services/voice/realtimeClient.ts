@@ -240,14 +240,24 @@ export class RealtimeClient {
           data instanceof Blob
         ) {
           // React Native sometimes hands binary frames as Blob. Convert.
-          data.arrayBuffer().then((buf) => {
-            this.binaryFrameCounter += 1;
-            if (this.binaryFrameCounter <= 3) {
-              debugDumpBinary(`bin frame #${this.binaryFrameCounter} (blob)`, buf);
-            }
-            this.opts.onBinary?.(buf);
-            this.tryDispatchServerMessage(buf);
-          });
+          data
+            .arrayBuffer()
+            .then((buf) => {
+              this.binaryFrameCounter += 1;
+              if (this.binaryFrameCounter <= 3) {
+                debugDumpBinary(`bin frame #${this.binaryFrameCounter} (blob)`, buf);
+              }
+              this.opts.onBinary?.(buf);
+              this.tryDispatchServerMessage(buf);
+            })
+            .catch((err) => {
+              // Don't let a Blob decode failure crash the WS as an
+              // unhandled promise rejection (would surface as a yellowbox
+              // in dev). Surface to the caller via onError so the UI
+              // can decide whether to retry.
+              console.warn("[ws] Blob → ArrayBuffer failed", err);
+              this.opts.onError?.(err);
+            });
         } else {
           // Fallback: try generic Buffer-like
           try {

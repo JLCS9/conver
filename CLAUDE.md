@@ -284,3 +284,174 @@ Day 5 — Reconnect logic on WS drop. iOS audio session interruption handling. T
   - When testing on a real device, the dev client must be built FOR that device's architecture. `npx expo run:ios --device` will rebuild against the connected iPhone. Allow ~5-8 min.
   - Free-tier Apple Developer accounts can sideload but the app expires after 7 days. Paid account ($99/yr) for longer-lived installs or TestFlight.
   - The `MicCapture` component is the canary for the Day-2 useAudioRecorder bug. If at any point we need to mount an audio hook at the top of useVoiceSession (e.g., to do mic level metering for a UI orb), test WS opens first — the failure mode is fast and obvious.
+- 2026-05-25 (Day 4 — late evening audit + hallucination fix): User reported the model was inventing user statements during conversation (e.g., responding with "Sounds like you were busy!" when user only said "Hi"). Ran a parallel three-agent audit (mobile / backend / gateway). Root cause of the hallucination identified in the gateway's Gemini setup message:
+  1. `generation_config.temperature` was unset → default ~1.0 → high creativity, low fidelity to actual input.
+  2. `realtime_input_config.automatic_activity_detection` was `{}` (defaults) → over-triggered, cutting model turns mid-sentence, training the model to "wing it".
+  3. `DAY1_SYSTEM_INSTRUCTION` literally said *"If the student goes silent for a few seconds, ask a short follow-up question to keep the conversation alive"* → encoded the gap-filling behaviour as a feature, not a bug.
+
+  Combined fix landed in `voice-gateway/src/upstream.ts`:
+  - `temperature: 0.6`, `top_p: 0.85`, `candidate_count: 1`, `media_resolution: "MEDIA_RESOLUTION_LOW"`
+  - `automatic_activity_detection` tuned: `start_of_speech_sensitivity: "START_SENSITIVITY_LOW"`, `end_of_speech_sensitivity: "END_SENSITIVITY_LOW"`, `prefix_padding_ms: 200`, `silence_duration_ms: 1200`
+  - `activity_handling: "NO_INTERRUPTION"`, `turn_coverage: "TURN_INCLUDES_ONLY_ACTIVITY"`
+  - `proactivity: { proactive_audio: false }`, `enable_affective_dialog: false`
+  - System prompt rewritten to forbid guessing: "If the student's audio is unclear, garbled, partial, or you are not confident what they said, ask them to repeat: 'Sorry, could you say that again?' Do not guess. If there is silence, stay quiet. Do not fill gaps with follow-ups."
+
+  Other fixes in the same wave:
+  - `backend/app/api/realtime/session/route.ts`: cap is now env-driven via `FREE_TIER_DAILY_LIMIT_SECONDS` + `MAX_SESSION_DURATION_SECONDS`. Defaults unchanged (300s / 720s). Set `FREE_TIER_DAILY_LIMIT_SECONDS=1800` in `/opt/converflow/backend/.env.local` for unblocked dev testing.
+  - `voice-gateway/src/server.ts`: WS `close` handlers now inspect the close code. Code 1000 → `markSessionCompleted`; anything else → `markSessionAborted` with the abnormal-close reason. Analytics will stop pretending crashes were clean wins.
+  - `mobile/src/services/voice/realtimeClient.ts`: Blob → ArrayBuffer promise chain now has a `.catch` that surfaces decode failures via `onError` instead of being an unhandled rejection.
+  - `mobile/src/components/MicCapture.tsx`: `onChunkRef.current = onChunk` moved inside `useEffect` (was a React-Concurrent foot-gun under double-render).
+  - `mobile/package.json` + `mobile/app.config.ts`: dropped `@siteed/audio-studio` dependency + plugin. Was dead weight since Day-4-A replaced it with `expo-audio`'s `useAudioStream`. Saves a few MB of native code and removes the very iOS recording-interruption listener whose existence was the Day-2/3 root cause.
+
+  Deploy required after these commits:
+  1. **Backend**: `cd /opt/converflow && git pull && docker compose up -d --build backend` (and optionally add `FREE_TIER_DAILY_LIMIT_SECONDS=1800` to `backend/.env.local` first).
+  2. **Voice-gateway**: `cd /opt/converflow && git pull && docker compose up -d --build voice-gateway` (the hallucination fix lives here).
+  3. **Mobile**: `npm install` (drops `@siteed/audio-studio`) then a native rebuild via `npx expo run:ios` to actually remove the unused module from the binary. Optional in dev — the dead module just sits there, harmless.
+
+  ## Current architecture (end-of-Day-4 snapshot)
+
+  ```
+  iPhone / iOS Sim                       VPS (Hostinger Paris, root@187.77.166.246)
+  +-----------------+                    +--------------------------------------+
+  | Converflow.app  |                    |  host nginx (HTTP/1.1, no HTTP/2)    |
+  |  (Expo SDK 56)  |   HTTPS / WSS      |    api.converflow.tech → 127.0.0.1   |
+  | Clerk auth      | ─────────────────► |       :8082  Next.js backend         |
+  | useVoiceSession |                    |       :8083  voice-gateway (WS)      |
+  | MicCapture      | ◄───── WSS ────────│  Both run in docker compose          |
+  | AudioPlayback   |                    +--------------------------------------+
+  +-----------------+                                  │
+                                                       │ Service-role
+                                                       ▼
+                                              +-----------------+
+                                              |  Supabase       |
+                                              |  (users,        |
+                                              |   sessions, …)  |
+                                              +-----------------+
+                                                       │
+                                                       │ HTTPS API
+                                                       ▼
+                                              +-----------------+
+                                              |  Clerk          |
+                                              |  (JWT verify)   |
+                                              +-----------------+
+
+  voice-gateway --- WSS ---► Google Gemini Live (gemini-2.5-flash-native-audio-latest, v1beta)
+  ```
+
+  **Mobile (Expo SDK 56)**
+  - `(app)/session.tsx` — voice screen, inline StyleSheet (NativeWind 4.2 text bug still parked). Shows phase, metrics, "Tú/Coach" transcripts, action button. Conditionally mounts `<MicCapture>` and `<AudioPlayback>` ONLY when `phase === "live"`.
+  - `hooks/useVoiceSession.ts` — orchestrator. State machine `idle → starting → live → stopping → ended` (or `error`). Owns POST to `/api/realtime/session`, opens WS via `RealtimeClient`, accumulates transcripts + per-turn audio buffer, publishes latest WAV URI for playback.
+  - `services/voice/realtimeClient.ts` — typed WS client. Knows the Gemini JSON-as-binary wire format; emits `onServerMessage(GeminiServerMessage)` + raw `onBinary` + `onText`. Always passes Clerk JWT via `?token=` query param (RN/iOS subprotocol bug from Day 2-3).
+  - `services/voice/audioCapture.ts` — encoding constants + base64 helper. Pure module, no React.
+  - `services/voice/audioSession.ts` — wraps `expo-audio`'s `setAudioModeAsync` for `PlayAndRecord` mode. Note: expo-audio's stream overrides this to `.record + .measurement` on start — known follow-up.
+  - `services/voice/audioPlayback.ts` — `base64ToBytes`, `buildWavFile` (PCM 24 kHz int16 mono → WAV), `writeTurnWavToCache`, `isLikelyMeaningfulEnglish` filter.
+  - `components/MicCapture.tsx` — `useAudioStream` consumer, sends PCM chunks to parent via `onChunk` callback. Memoized.
+  - `components/AudioPlayback.tsx` — `useAudioPlayer` consumer, plays per-turn WAVs as they're written. Memoized.
+
+  **Backend (Next.js 15, App Router)**
+  - `app/api/me/route.ts` — Clerk-gated GET that returns the user row from Supabase (and creates it if missing). Mobile calls on every screen mount; UPSERT-on-every-call is a known inefficiency (audit HIGH-4).
+  - `app/api/onboarding/route.ts` — saves onboarding answers.
+  - `app/api/push/register/route.ts` — stores Expo push tokens for daily reminders.
+  - `app/api/realtime/session/route.ts` — mints a `sessions` row, enforces the daily cap (now env-driven), returns sessionId + wsUrl + maxDurationSeconds for the client to use.
+  - `app/api/health/route.ts` — shallow liveness.
+  - `lib/supabaseAdmin.ts` — singleton service-role Supabase client (bypasses RLS). Used by every API route since we already do per-user filtering in code.
+
+  **voice-gateway (Node 22 + `ws` + `@clerk/backend`)**
+  - `server.ts` — HTTP server with WS upgrade handler. Auth via `?token=<jwt>`, looks up the session in Supabase, opens upstream WS to Gemini, pipes both directions raw (no parsing). On either-side close, marks the session completed/aborted with observed duration.
+  - `upstream.ts` — opens the Gemini Live WS, sends the `setup` message (model + generation_config + speech_config + system_instruction + realtime_input_config + transcription toggles). This is where today's hallucination fix lives.
+  - `clerkAuth.ts` — JWT verification via `@clerk/backend`. Caches JWKS internally.
+  - `supabase.ts` — service-role client for session row lookups + updates.
+  - `env.ts` — Zod-validated env loader.
+  - `Dockerfile` — Node 22-alpine, multi-stage build (build TS, run dist).
+
+  **Infrastructure**
+  - VPS at `root@187.77.166.246` (Hostinger Paris). `/opt/converflow` holds the repo + `docker-compose.yml`.
+  - `docker compose` runs two services: `backend` (port 8082 → 3000 inside) and `voice-gateway` (port 8083 → 8083 inside).
+  - Host nginx terminates SSL for `api.converflow.tech`, proxies `/` to backend, `/voice` (Upgrade: websocket) to gateway. **HTTP/2 explicitly disabled** on this vhost (Day-2 finding: RN iOS WebSocket + nginx HTTP/2 RFC 8441 Extended CONNECT conflict).
+  - DNS via Cloudflare (proxy DISABLED for the api subdomain — was breaking WSS in Day-1).
+  - SSL via Let's Encrypt + certbot, auto-renew every 60 days.
+
+  ## Roadmap to production
+
+  Time spent so far: 3 weeks (planning + Week 3 voice spike: Days 1-4).
+  Remaining estimate to a polished TestFlight beta: **~6-8 weeks**.
+
+  **Week 4 — Polish + iPhone validation (5 days)**
+  - Day 5: iPhone cable install (Xcode signing fix). Validate full loop with real mic + real speakers. Tighten audio-session conflict (`AudioStream.start()` overriding `PlayAndRecord`).
+  - Day 6: NativeWind 4.2 text-styles fix (so the rest of the app stops looking broken). Onboarding screens polish.
+  - Day 7: Voice session UI redesign — replace the spike layout with the planned orb visualization, live transcripts cleaner, end-of-session feedback card.
+  - Day 8: Audit fix wave 2 — race condition in cap (Postgres advisory lock), session janitor for stuck-active rows, `/api/me` caching, error-response scrubbing.
+  - Day 9: Bug bash on real device. Latency tuning to hit <800ms TTFA target.
+
+  **Week 5 — Pedagogy layer (5 days)**
+  - Day 10-11: Prompts table in Supabase, prompt rotation (news / journal / challenge / tech_scenario formats). Replace hardcoded DAY1_SYSTEM_INSTRUCTION.
+  - Day 12-13: End-of-session feedback generation: send the transcripts to a second Gemini call (text-only, cheaper model) to get pronunciation issues, grammar errors, fluency score, 1-3 things to work on.
+  - Day 14: Feedback persistence + history screen.
+
+  **Week 6 — Streak + retention loop (5 days)**
+  - Day 15-16: Daily streak logic in Supabase + push notification scheduler (uses `expo-notifications` token already collected at onboarding).
+  - Day 17-18: Home screen — today's session, streak counter, history of recent feedback cards.
+  - Day 19: Onboarding A/B (5-min trial without auth? sign up after first session?).
+
+  **Week 7 — Pricing + paywall (5 days)**
+  - Day 20-21: Stripe (or Apple In-App Purchase via RevenueCat) for the premium tier. Premium = no daily cap, longer sessions (12 → 30 min), advanced feedback.
+  - Day 22-23: Paywall screen, restore purchases, subscription state in Supabase.
+  - Day 24: Server-side receipt validation.
+
+  **Week 8 — Beta launch prep (5 days)**
+  - Day 25: TestFlight build pipeline (EAS Build). App Store Connect setup.
+  - Day 26-27: Privacy policy, terms, App Store metadata, screenshots.
+  - Day 28: Internal TestFlight (10 beta users via direct invite).
+  - Day 29: Iterate on beta feedback.
+
+  **Optional Weeks 9-10 — Production polish**
+  - Onboarding micro-copy A/B; analytics events to a real product (PostHog / Mixpanel); error monitoring (Sentry); usage dashboards; cost monitoring per user; support flow.
+
+  **Confidence on the 6-8 week estimate:** ~70%. Risks:
+  - Audio session juggling on real device may need an Expo module rewrite (potential 3-5 day slip).
+  - Gemini Live API is still in v1beta — Google has changed wire format twice in the last 6 months, could happen again.
+  - App Store review for voice-recording apps is sometimes slow (5-10 day delay first time).
+
+  **What "production-ready" means for a Spanish-speaking developer learning English:**
+  - Tap a button, talk in English to an AI tutor for 5-15 minutes.
+  - Tutor speaks back in English, asks relevant follow-ups, only corrects 1-2 things per turn (not pedantic).
+  - End of session: short report with what went well, what to work on (pronunciation, grammar, vocabulary).
+  - Daily streak + push notification at a chosen time keeps you coming back.
+  - Paywall after a few free days.
+  - TestFlight beta first, App Store after 2-4 weeks of beta feedback.
+
+  **What "production-ready" does NOT mean yet:**
+  - No fine-grained per-phoneme pronunciation feedback (Gemini Live doesn't expose this directly — would need a second pass through Google Speech API or Azure Pronunciation Assessment, an extra ~2 weeks if we want it).
+  - No vocabulary tracking / spaced repetition (post-launch feature).
+  - No personalisation of tutor style (post-launch).
+
+  ## Where the ROOT bug of hallucination really sat
+
+  Three audit findings in voice-gateway were the smoking gun. The mobile + backend audits returned mostly hygiene items. The whole class of "model invents user statements" is a **prompt + sampling-config problem at the upstream layer**, not a transport or client problem. Today's commit should make the same simulator test feel noticeably more grounded. The TRUE quality win comes when we hit a real device with a real microphone (less garbled audio → fewer ambiguous turns → less need for the model to guess).
+
+  ## Audit punch list — items NOT addressed in this commit (parked for Day-5+ waves)
+
+  **Mobile** (from audit):
+  - HIGH: `stop()` guard doesn't allow recovery mid-`starting` phase.
+  - HIGH: `start()` useCallback depends on `phase` — fragile if consumers ever use it in deps.
+  - MEDIUM: WAV cache files leak (no cleanup, accumulate over weeks).
+  - MEDIUM: `arrayBufferToBase64` allocates a 32 KB number array per chunk — GC churn at 16 kHz.
+  - MEDIUM: `lastPlayedUriRef` in AudioPlayback blocks replays on error.
+  - MEDIUM: `audioSession.ts` PlayAndRecord override conflict with `expo-audio`'s session — confirmed by audit, suspected cause of silent playback on real device. Test on iPhone first; if confirmed, fix by re-asserting `setAudioModeAsync` after `stream.start()`.
+
+  **Backend** (from audit):
+  - BLOCKER: race condition in cap check (two parallel POSTs both pass the check). Fix with Postgres advisory lock or partial unique index on `(user_id) WHERE status='active'`.
+  - BLOCKER: sessions stuck in `active` (gateway crash, network drop) never count toward the cap — exploitable. Fix with a janitor that marks stale active rows as aborted.
+  - HIGH: `/api/me` does an UPSERT on every read — wasteful, also stomps email edits. Fix: SELECT-first, UPSERT only when missing.
+  - HIGH: error responses leak Postgres internals (`message`, `code`, `hint`, `details`). Sanitize.
+  - MEDIUM: cap reset uses UTC midnight, not user timezone (timezone is on the user row, just not used here).
+
+  **voice-gateway** (from audit):
+  - HIGH: no concurrent-session enforcement per user. A user can open N parallel WS on the same sessionId.
+  - HIGH: `Dockerfile` uses `npm install` instead of `npm ci` — non-reproducible builds.
+  - MEDIUM: no backpressure on `upstreamWs.send` — under flaky uplink, frames pile up in memory.
+  - MEDIUM: setup-message send isn't acked before `open()` resolves — race if client sends audio before Gemini's `setupComplete`.
+  - LOW: JWT verification doesn't pass `authorizedParties` to Clerk SDK.
+  - LOW: health endpoint exposes version verbatim.
+
+  These get attacked in the Week-4 audit-fix wave (Day 8) — none are blocking for the next iPhone test.

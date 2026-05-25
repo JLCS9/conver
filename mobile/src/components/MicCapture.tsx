@@ -29,9 +29,13 @@ interface MicCaptureProps {
 function MicCaptureInner({ onChunk }: MicCaptureProps) {
   // Store the callback in a ref so the onBuffer closure stays stable —
   // expo-audio's hook re-reads options object on every render otherwise,
-  // and we don't want to thrash native bindings.
+  // and we don't want to thrash native bindings. Assignment lives inside
+  // useEffect so React Concurrent's potential double-render doesn't
+  // capture a stale closure (was a flagged audit item).
   const onChunkRef = useRef(onChunk);
-  onChunkRef.current = onChunk;
+  useEffect(() => {
+    onChunkRef.current = onChunk;
+  }, [onChunk]);
 
   // Counter for log-throttling — chunks arrive every ~10-50 ms, we don't
   // want to spam Metro with thousands of log lines.
