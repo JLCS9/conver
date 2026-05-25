@@ -83,11 +83,29 @@ export function openUpstream(
       // We ask for AUDIO output (and TEXT for transcripts, useful for the
       // live transcription UX on the client). Google echoes user audio
       // transcripts back via `input_audio_transcription` if enabled.
+      //
+      // `speech_config.language_code` pins BOTH the input-transcription
+      // language hint AND the TTS output language. Without it Google
+      // auto-detects and on noisy / accented audio happily transcribes
+      // English-with-a-Spanish-accent as Vietnamese or Arabic. We're
+      // teaching English so we hard-code "en-US"; the student speaks
+      // English even when broken. (When we add a Spanish onboarding mode
+      // later, this becomes a per-session setting.)
+      //
+      // `voice_name: "Aoede"` is a Google-preset English female voice
+      // that works well at conversational pace. Other native-audio
+      // voices to evaluate later: Puck, Kore, Charon, Fenrir, Leda.
       const setupMessage = {
         setup: {
           model: model.startsWith("models/") ? model : `models/${model}`,
           generation_config: {
             response_modalities: ["AUDIO"],
+            speech_config: {
+              language_code: "en-US",
+              voice_config: {
+                prebuilt_voice_config: { voice_name: "Aoede" },
+              },
+            },
           },
           system_instruction: {
             parts: [{ text: DAY1_SYSTEM_INSTRUCTION }],
