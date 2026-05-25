@@ -1,7 +1,7 @@
 # Converflow — Project context for Claude
 
 > Live decisions and project state. Future Claude sessions read this first.
-> Last updated: 2026-05-20 (Week 3 Day 1 closed — voice loop live).
+> Last updated: 2026-05-25 (Week 3 Day 2 BLOCKED — RN WebSocket vs iOS 26.5 Sim).
 
 ## Product
 
@@ -184,3 +184,24 @@ Day 5 — Reconnect logic on WS drop. iOS audio session interruption handling. T
      - The deployed nginx vhost lacked the `/voice` location (template change had never been copied), so WS upgrades silently routed to the Next.js backend and hung.
   6. **Cost economics confirmed reasonable.** Public Gemini pricing at `gemini-3.5-flash` tier (which is also the price tier for 2.5-flash-native-audio): $0.25/M input audio tokens, $0.75/M output. At ~32 tokens/sec, a 10-min session is ~$0.01. Premium €9.99/mo with 30 sessions/mo → $0.30 IA cost → ~97% gross margin. Free tier 5 min/day → ~$0.15/user/mo subsidy. Context caching reduces another 30-40%.
   7. **The TTFA target needs revisiting.** Brief says <800ms TTFA. Text-prompt path measured 2.4s but includes TTS warmup. Real audio-input path is theoretically faster (model stays in audio domain end-to-end). Day 2 measurement from the mobile app with real PCM input will tell us if 800ms is achievable on Gemini Live from Madrid or if we need to negotiate the number down/move to Pipecat sooner.
+- 2026-05-25 (Week 3 Day 2): **Mobile audio scaffolded + voice session UI live in dev build, BUT WebSocket to voice-gateway is BLOCKED by an iOS-Simulator-specific issue.** Three commits land before the block: install `@siteed/expo-audio-stream@1.16.0` + `expo-av` and rebuild the dev client (later versions of audio-stream require Expo >=52, the renamed `@siteed/audio-studio` is the canonical package going forward); voice services scaffold (`mobile/src/services/voice/{realtimeClient,audioCapture,audioSession}.ts`); `useVoiceSession` hook + `(app)/session.tsx` screen + Home entry button. Three follow-on commits chase the WS bug: `069d4ed` fixes an /api/me infinite loop (getToken in useEffect deps + Clerk recreates the function each render — 843 calls in <2min before the fix) and adds AbortController+timeout to `src/lib/api.ts`; `9e5b615` switches the WS auth from `Sec-WebSocket-Protocol: Bearer.<jwt>` to `?token=<jwt>` query param because RN's iOS WebSocket has buggy subprotocol negotiation; `73e8481` disables HTTP/2 on the api.converflow.tech nginx vhost because RN WebSocket negotiated h2 via ALPN and nginx 1.27 doesn't bridge HTTP/2 Extended CONNECT (RFC 8441) → HTTP/1.1 backend Upgrade cleanly.
+
+  **State at end of day:** none of those fixes solved the actual block. The mobile app calls `new WebSocket(wss://api.converflow.tech/voice?...&token=...)`, sees `[ws] connecting`, and the close handler fires immediately with `code=0 reason=""`. The voice-gateway sees ZERO incoming connections (logs are empty for new attempts). nginx access logs show ZERO /voice hits from the mobile user-agent `Converflow/1 CFNetwork/3860.600.12 Darwin/25.4.0` — only the curl probes we ran for diagnosis. iOS-Sim system logs (`xcrun simctl spawn booted log stream --predicate 'process == "Converflow"'`) show successful TLS 1.3 handshakes to `api.converflow.tech:443` for `/api/me` (ALPN http/1.1, cert trust OK), Clerk, Metro, etc. — but ZERO WebSocket-related events anywhere. The WebSocket attempt never reaches CFNetwork at all.
+
+  **Working hypothesis:** RN 0.74.5 still uses SocketRocket (RCTSRWebSocket) for the JS `WebSocket` global instead of `NSURLSessionWebSocketTask`. SocketRocket has known issues with modern TLS/iOS combos and is being phased out (RN 0.75+ defaults to URLSession). On iOS 26.5 Simulator the combination silently fails before producing any system-level network call. This isn't our code — backend + nginx + gateway all proved to handle WS upgrades correctly via curl from the same Mac.
+
+  **What's NOT the bug** (eliminated empirically):
+  - nginx routing: curl with WS Upgrade headers gets HTTP 401 from gateway → routing works.
+  - voice-gateway code: latency spike from Node `ws` (scripts/measure-voice-latency.mjs) successfully opens WS, gets `client connected, opening upstream` logs, completes Google upstream setup, streams 60+ binary frames back. Proven on 2026-05-20.
+  - HTTP/2 mismatch: disabled `http2 on;` on the vhost, confirmed `curl --http2 https://...` now returns `HTTP/1.1`. WS still fails the same way.
+  - JWT/auth shape: tried Bearer.<jwt> subprotocol, then ?token=<jwt>, then a fallback that accepts both — same close code 0 on the client side.
+  - Backend deploy state: gateway logs confirmed the latest commit is running (`handleProtocols` was active in the rebuilt image).
+  - Mobile bundle freshness: Metro served 16+ bundles after the relevant code changes; `[ws] connecting … (auth via ?token=)` appears in logs, confirming the new client code is loaded.
+
+  **Day-3 plan (in order of preference):**
+  1. **Write a minimal repro outside our app** — a 30-line Expo SDK 51 project that just does `new WebSocket('wss://api.converflow.tech/voice?sessionId=test&token=fake')` and logs the events. If the close-code-0 reproduces, it's confirmed an RN+iOS Sim bug → file the issue, then try option 2. If it works in the repro, something in our app is interfering (maybe a Reanimated/NativeWind/other native module sabotaging SocketRocket) → bisect.
+  2. **Try Expo SDK 53 or 54 upgrade.** Likely uses `NSURLSessionWebSocketTask` by default. 2-4h work, risk of cascading dep breaks (we pinned NativeWind 4.1.x to dodge Reanimated 4, that pin would need re-evaluation under SDK 53+).
+  3. **Test on a real iPhone.** Requires Apple Developer Program ($99) + provisioning + dev build for device. Was Week-9 scope, would be pulled forward. If WS works on device but not Sim, confirms Sim bug and we keep developing on device until SDK upgrade is feasible.
+  4. **Worst case: write an HTTP-polling shim** for the Day-2 spike to get a TTFA number on the wire. Awful UX but proves the rest of the stack and unblocks downstream work while we figure out the real WS path. Don't ship this — replace it with proper WS before TestFlight.
+
+  Diagnostics that are useful to keep: `[ws] connecting`, `[voice] step N done`, `[api] ← METHOD path → HTTP status in Xms` logs are still in the code — they earn their keep until we ship.
