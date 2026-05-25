@@ -1,18 +1,21 @@
-// Voice session screen — Day 2 spike UI.
+// Voice session screen — Day-3 working state.
 //
-// Minimal on purpose: one big toggle button, status pill, and a metrics
-// readout for debugging (chunks/bytes sent and received + TTFA). NativeWind
-// styling, no fancy animations yet — the orb + transcript come in Day 4.
-//
-// What the user sees:
-//   - Initial: "Empezar sesión" button + small "Voice spike — Day 2" header.
-//   - While live: button turns "Terminar sesión", status shows "live", and
-//     the metrics tick in real time. First inbound binary > 5 KB stamps
-//     `timeToFirstResponseMs` — that's our TTFA proxy.
-//   - On stop/error: shows final metrics and any error message.
+// Inline StyleSheet only (no NativeWind) because NativeWind 4.2 + SDK 56
+// has a text-styles-not-applying bug we're parking for a polish pass.
+// The session UI here is intentionally bare: status pill + metrics +
+// big toggle button. Enough surface to validate the WS round-trip end-
+// to-end. The orb / live transcript / proper styling lands in Week 4.
 
 import { useRouter } from "expo-router";
-import { ActivityIndicator, Pressable, SafeAreaView, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  Pressable,
+  SafeAreaView,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { useVoiceSession } from "@/src/hooks/useVoiceSession";
 
 export default function SessionScreen() {
@@ -34,56 +37,53 @@ export default function SessionScreen() {
     : "Empezar sesión";
 
   return (
-    <SafeAreaView className="flex-1 bg-white">
-      <View className="flex-1 px-6 pt-8 pb-10 justify-between">
-        {/* Top: header + status */}
-        <View className="gap-3">
-          <View className="flex-row items-center justify-between">
-            <Text className="text-xs font-semibold text-brand-muted uppercase tracking-wider">
-              Voice spike · Día 2
-            </Text>
-            <Pressable onPress={() => router.back()}>
-              <Text className="text-sm text-brand-muted">Cerrar</Text>
-            </Pressable>
-          </View>
-          <Text className="text-3xl font-bold text-brand-ink leading-tight">
-            Hablemos en inglés
-          </Text>
-          <View className="flex-row items-center gap-2">
-            <View
-              className={`w-2 h-2 rounded-full ${
-                isLive
-                  ? "bg-emerald-500"
+    <SafeAreaView style={styles.root}>
+      <ScrollView contentContainerStyle={styles.content}>
+        <View style={styles.headerRow}>
+          <Text style={styles.eyebrow}>Voice spike · Día 3</Text>
+          <Pressable onPress={() => router.back()}>
+            <Text style={styles.closeText}>Cerrar</Text>
+          </Pressable>
+        </View>
+        <Text style={styles.title}>Hablemos en inglés</Text>
+
+        <View style={styles.statusRow}>
+          <View
+            style={[
+              styles.dot,
+              {
+                backgroundColor: isLive
+                  ? "#10b981"
                   : phase === "error"
-                  ? "bg-red-500"
+                  ? "#ef4444"
                   : isBusy
-                  ? "bg-amber-500"
-                  : "bg-gray-300"
-              }`}
-            />
-            <Text className="text-sm text-brand-muted">phase: {phase}</Text>
-          </View>
-          {metadata ? (
-            <Text className="text-xs text-brand-muted leading-5">
-              session {metadata.sessionId.slice(0, 8)}…  ·  model {metadata.model}  ·  cap {metadata.maxDurationSeconds}s
-            </Text>
-          ) : null}
+                  ? "#f59e0b"
+                  : "#d1d5db",
+              },
+            ]}
+          />
+          <Text style={styles.statusText}>phase: {phase}</Text>
         </View>
 
-        {/* Middle: metrics */}
-        <View className="gap-3">
+        {metadata ? (
+          <Text style={styles.meta}>
+            session {metadata.sessionId.slice(0, 8)}…  ·  model {metadata.model}  ·  cap {metadata.maxDurationSeconds}s
+          </Text>
+        ) : null}
+
+        <View style={styles.metricsBox}>
           <Metric label="Chunks sent (mic → Gemini)" value={String(metrics.chunksSent)} />
           <Metric
             label="Bytes sent"
             value={metrics.bytesSent === 0 ? "0" : `${(metrics.bytesSent / 1024).toFixed(1)} KB`}
           />
-          <Metric label="Chunks received (Gemini → us)" value={String(metrics.chunksReceived)} />
+          <Metric label="Chunks received" value={String(metrics.chunksReceived)} />
           <Metric
             label="Bytes received"
             value={metrics.bytesReceived === 0 ? "0" : `${(metrics.bytesReceived / 1024).toFixed(1)} KB`}
           />
           <Metric
-            label="TTFA (first audio sent → first response)"
+            label="TTFA (ws open → first audio chunk)"
             value={
               metrics.timeToFirstResponseMs === null
                 ? "—"
@@ -91,31 +91,32 @@ export default function SessionScreen() {
             }
             highlight={metrics.timeToFirstResponseMs !== null}
           />
-          {error ? (
-            <Text className="text-sm text-red-600 leading-5 mt-2">{error}</Text>
-          ) : null}
-          <Text className="text-xs text-brand-muted leading-5 mt-2">
-            Día 2 spike: no se reproduce el audio del modelo (los frames son protobuf,
-            la decodificación va a la gateway en Día 3). Aquí solo se mide latencia
-            y se valida la cadena.
-          </Text>
         </View>
 
-        {/* Bottom: the action button */}
+        {error ? <Text style={styles.errorText}>{error}</Text> : null}
+
+        <Text style={styles.note}>
+          Día 3: mic capture desactivado (@siteed/audio-studio rompe el WS en
+          iOS 26.5 Sim). Esta pantalla mide WS → gateway → upstream Google de
+          ida. Mic + audio playback se cablean en Día 4 con expo-audio.
+        </Text>
+
         <Pressable
           onPress={isLive ? stop : start}
           disabled={isBusy || !canTrigger}
-          className={`rounded-2xl py-5 items-center active:opacity-80 disabled:opacity-60 ${
-            isLive ? "bg-red-600" : "bg-brand"
-          }`}
+          style={[
+            styles.button,
+            isLive ? styles.buttonStop : styles.buttonStart,
+            (isBusy || !canTrigger) && styles.buttonDisabled,
+          ]}
         >
           {isBusy ? (
             <ActivityIndicator color="#fff" />
           ) : (
-            <Text className="text-white text-lg font-semibold">{buttonLabel}</Text>
+            <Text style={styles.buttonText}>{buttonLabel}</Text>
           )}
         </Pressable>
-      </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -130,15 +131,46 @@ function Metric({
   highlight?: boolean;
 }) {
   return (
-    <View className="flex-row items-center justify-between border-b border-gray-100 py-2">
-      <Text className="text-sm text-brand-muted">{label}</Text>
-      <Text
-        className={`text-base font-semibold ${
-          highlight ? "text-emerald-600" : "text-brand-ink"
-        }`}
-      >
-        {value}
-      </Text>
+    <View style={styles.metricRow}>
+      <Text style={styles.metricLabel}>{label}</Text>
+      <Text style={[styles.metricValue, highlight && styles.metricValueHi]}>{value}</Text>
     </View>
   );
 }
+
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: "#fff" },
+  content: { padding: 24, gap: 16 },
+  headerRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  eyebrow: { fontSize: 11, fontWeight: "600", letterSpacing: 1, color: "#64748b", textTransform: "uppercase" },
+  closeText: { fontSize: 14, color: "#64748b" },
+  title: { fontSize: 28, fontWeight: "700", color: "#0f172a" },
+  statusRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  dot: { width: 8, height: 8, borderRadius: 4 },
+  statusText: { fontSize: 13, color: "#64748b" },
+  meta: { fontSize: 11, color: "#64748b", lineHeight: 16 },
+  metricsBox: { marginTop: 8, gap: 0 },
+  metricRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 10,
+    borderBottomColor: "#f1f5f9",
+    borderBottomWidth: 1,
+  },
+  metricLabel: { fontSize: 13, color: "#64748b", flex: 1 },
+  metricValue: { fontSize: 15, fontWeight: "600", color: "#0f172a" },
+  metricValueHi: { color: "#059669" },
+  errorText: { fontSize: 13, color: "#dc2626", marginTop: 4 },
+  note: { fontSize: 12, color: "#64748b", lineHeight: 18, marginTop: 8 },
+  button: {
+    borderRadius: 14,
+    paddingVertical: 18,
+    alignItems: "center",
+    marginTop: 12,
+  },
+  buttonStart: { backgroundColor: "#0ea5e9" },
+  buttonStop: { backgroundColor: "#dc2626" },
+  buttonDisabled: { opacity: 0.6 },
+  buttonText: { color: "#fff", fontSize: 17, fontWeight: "600" },
+});

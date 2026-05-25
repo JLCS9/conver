@@ -1,32 +1,35 @@
-// useVoiceSession — orchestrates a full voice round-trip for the Day-2 spike.
+// useVoiceSession — orchestrates a voice round-trip from the mobile client.
+//
+// Day-3 status: audio CAPTURE is temporarily disabled. The mic recorder
+// hook from @siteed/audio-studio installs an iOS recording-interruption
+// listener at mount that breaks NSURLSessionWebSocketTask on SDK 56 +
+// iOS 26.5 Sim (the WS closes with code=0 before the handshake completes).
+// We've proven via two diagnostic buttons in (app)/session.tsx (raw WS
+// to fake URL, real-auth WS to gateway) that the WS itself is fine when
+// the recorder hook is NOT in the React tree.
+//
+// To unblock voice-loop development we (1) keep the WS path live so the
+// gateway sees real connections from the mobile and the server side can
+// be exercised end-to-end, (2) skip mic capture entirely so the recorder
+// hook doesn't poison the WS, and (3) park a TODO to switch to expo-audio's
+// recorder (we already installed it for setAudioModeAsync) in Day 4.
 //
 // What it does:
 //   1. Calls POST /api/realtime/session → gets { sessionId, wsUrl }.
-//   2. Opens a WS to our voice-gateway with Bearer-subprotocol auth.
-//   3. Configures the iOS audio session for duplex (PlayAndRecord+VoiceChat).
-//   4. Starts mic capture via @siteed/expo-audio-stream — 50 ms PCM 16 kHz
-//      mono chunks emitted via onAudioStream callback.
-//   5. Pumps each chunk through the WS as `realtime_input.media_chunks`.
-//   6. Counts bytes / times the FIRST inbound binary frame.
+//   2. Opens a WS to our voice-gateway with `?token=<clerk_jwt>`.
+//   3. Configures the iOS audio session for duplex.
+//   4. Receives binary frames from upstream Gemini Live (proxied) and
+//      counts bytes + times the first one as the response-arrival proxy.
 //
-// What it intentionally does NOT do in Day 2:
-//   - Decode the binary frames Google sends back (they're protobuf-wrapped
-//     PCM; we'll add server-side decoding in the voice-gateway in Day 3
-//     and forward raw PCM to mobile then). Today we just measure round-trip
-//     latency and prove the loop wiring.
-//   - Play audio. Same reason — without the decoder, we can't extract PCM.
-//   - Handle reconnect, cap warnings, interruptions. Day 3-5.
-//
-// Returns a small state machine + metrics so the screen can render status.
+// Out of scope until audio recording is wired up:
+//   - Sending mic chunks to Google. The session is one-way (server → us)
+//     until then. Useful for measuring server-side latency in isolation.
+//   - Playback of received audio. Same protobuf-decode-on-gateway problem
+//     as before; we'll tackle once mic flows.
 
 import { useAuth } from "@clerk/clerk-expo";
-import { useAudioRecorder } from "@siteed/expo-audio-stream";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/src/lib/api";
-import {
-  GEMINI_RECORDING_CONFIG,
-  chunkToBase64,
-} from "@/src/services/voice/audioCapture";
 import {
   configureForVoiceSession,
   releaseAudioSession,
@@ -47,7 +50,7 @@ interface Metrics {
   chunksSent: number;
   bytesReceived: number;
   chunksReceived: number;
-  /** ms between first audio chunk SENT and first binary frame RECEIVED. */
+  /** ms between WS open and first inbound binary frame >5kB. */
   timeToFirstResponseMs: number | null;
 }
 
@@ -82,36 +85,9 @@ export function useVoiceSession(): UseVoiceSessionResult {
   const [metadata, setMetadata] = useState<SessionMetadata | null>(null);
   const [metrics, setMetrics] = useState<Metrics>(EMPTY_METRICS);
 
-  // Refs for things we don't want to re-render on.
   const clientRef = useRef<RealtimeClient | null>(null);
-  const firstSentAtRef = useRef<number | null>(null);
+  const wsOpenedAtRef = useRef<number | null>(null);
   const ttfrRecordedRef = useRef(false);
-
-  // @siteed/expo-audio-stream hook. Recording starts when we call .startRecording.
-  const recorder = useAudioRecorder();
-
-  const handleAudioStream = useCallback(
-    async (event: Parameters<typeof chunkToBase64>[0]) => {
-      const base64 = chunkToBase64(event);
-      if (!base64) return;
-
-      const client = clientRef.current;
-      if (!client) return;
-
-      client.sendAudioChunk(base64);
-
-      if (firstSentAtRef.current === null) {
-        firstSentAtRef.current = performance.now();
-      }
-
-      setMetrics((m) => ({
-        ...m,
-        chunksSent: m.chunksSent + 1,
-        bytesSent: m.bytesSent + event.eventDataSize,
-      }));
-    },
-    [],
-  );
 
   const start = useCallback(async () => {
     console.log("[voice] start() called, current phase=", phase);
@@ -119,18 +95,17 @@ export function useVoiceSession(): UseVoiceSessionResult {
 
     setError(null);
     setMetrics(EMPTY_METRICS);
-    firstSentAtRef.current = null;
+    wsOpenedAtRef.current = null;
     ttfrRecordedRef.current = false;
     setPhase("starting");
 
     try {
-      // 1. Handshake — get sessionId + wsUrl from our backend.
       console.log("[voice] step 1: POST /api/realtime/session...");
       const session = await api<RealtimeSessionResponse>(
         "/api/realtime/session",
         { method: "POST", body: JSON.stringify({}), getToken },
       );
-      console.log("[voice] step 1 done, sessionId=", session.sessionId.slice(0, 8), "wsUrl=", session.wsUrl);
+      console.log("[voice] step 1 done, sessionId=", session.sessionId.slice(0, 8));
       setMetadata({
         sessionId: session.sessionId,
         wsUrl: session.wsUrl,
@@ -138,13 +113,11 @@ export function useVoiceSession(): UseVoiceSessionResult {
         maxDurationSeconds: session.maxDurationSeconds,
       });
 
-      // 2. Clerk JWT for the WS auth.
       console.log("[voice] step 2: getToken for WS bearer...");
       const bearer = await getToken();
       if (!bearer) throw new Error("Clerk getToken returned null");
       console.log("[voice] step 2 done, bearer len=", bearer.length);
 
-      // 3. Open the WS.
       console.log("[voice] step 3: opening WS...");
       const client = new RealtimeClient({
         wsUrl: session.wsUrl,
@@ -159,19 +132,17 @@ export function useVoiceSession(): UseVoiceSessionResult {
             };
             if (
               !ttfrRecordedRef.current &&
-              firstSentAtRef.current !== null &&
-              data.byteLength > 5_000 // first big audio chunk
+              wsOpenedAtRef.current !== null &&
+              data.byteLength > 5_000
             ) {
               ttfrRecordedRef.current = true;
-              next.timeToFirstResponseMs = now - firstSentAtRef.current;
+              next.timeToFirstResponseMs = now - wsOpenedAtRef.current;
             }
             return next;
           });
         },
         onText: (text) => {
-          // Won't normally fire — Live API in v1beta sends binary — but
-          // we log it just in case for debugging.
-          console.log("[voice] text frame received:", text.slice(0, 200));
+          console.log("[voice] text frame:", text.slice(0, 200));
         },
         onError: (err) => {
           console.warn("[voice] ws error", err);
@@ -179,56 +150,45 @@ export function useVoiceSession(): UseVoiceSessionResult {
       });
       clientRef.current = client;
       await client.open();
+      wsOpenedAtRef.current = performance.now();
       console.log("[voice] step 3 done, WS open");
 
-      // 4. Audio session.
       console.log("[voice] step 4: configureForVoiceSession...");
       await configureForVoiceSession();
       console.log("[voice] step 4 done");
 
-      // 5. Start mic capture.
-      console.log("[voice] step 5: recorder.startRecording...");
-      await recorder.startRecording({
-        ...GEMINI_RECORDING_CONFIG,
-        onAudioStream: handleAudioStream,
-      });
-      console.log("[voice] step 5 done — going live");
+      // TODO Day 4: mic capture via expo-audio's recorder API. Skipped on
+      // Day 3 because @siteed/audio-studio's useAudioRecorder() installs
+      // an iOS interruption listener at mount that breaks the WebSocket.
+      console.log("[voice] step 5 skipped (no audio capture in Day 3 build)");
 
       setPhase("live");
     } catch (e) {
       setError((e as { message?: string }).message ?? "Failed to start voice session");
       setPhase("error");
-      // Defensive cleanup.
-      try { await recorder.stopRecording(); } catch { /* ignore */ }
       try { clientRef.current?.close(); } catch { /* ignore */ }
       try { await releaseAudioSession(); } catch { /* ignore */ }
       clientRef.current = null;
     }
-  }, [getToken, handleAudioStream, phase, recorder]);
+  }, [getToken, phase]);
 
   const stop = useCallback(async () => {
     if (phase !== "live") return;
     setPhase("stopping");
-    try {
-      await recorder.stopRecording();
-    } catch { /* ignore */ }
     try { clientRef.current?.close(); } catch { /* ignore */ }
     clientRef.current = null;
     try { await releaseAudioSession(); } catch { /* ignore */ }
     setPhase("ended");
-  }, [phase, recorder]);
+  }, [phase]);
 
-  // On unmount, make sure we don't leave the mic running.
   useEffect(() => {
     return () => {
       if (clientRef.current) {
         try { clientRef.current.close(); } catch { /* ignore */ }
       }
-      // recorder.stopRecording is async but useEffect cleanup is sync — best-effort.
-      void recorder.stopRecording().catch(() => undefined);
       void releaseAudioSession().catch(() => undefined);
     };
-  }, [recorder]);
+  }, []);
 
   return { phase, error, metadata, metrics, start, stop };
 }
