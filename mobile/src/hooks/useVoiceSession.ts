@@ -15,6 +15,12 @@ import { useAuth } from "@clerk/clerk-expo";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/src/lib/api";
 import {
+  base64ToBytes,
+  buildWavFile,
+  isLikelyMeaningfulEnglish,
+  writeTurnWavToCache,
+} from "@/src/services/voice/audioPlayback";
+import {
   configureForVoiceSession,
   releaseAudioSession,
 } from "@/src/services/voice/audioSession";
@@ -55,6 +61,10 @@ export interface UseVoiceSessionResult {
   metadata: SessionMetadata | null;
   metrics: Metrics;
   transcripts: Transcripts;
+  /** URI of the most recently-assembled turn WAV file. Each new value
+   *  is meant to be fed to AudioPlayback for playback. Null until the
+   *  first turn is complete with audio. */
+  playbackUri: string | null;
   start: () => Promise<void>;
   stop: () => Promise<void>;
   /** Push a base64-encoded PCM chunk to the upstream. No-op if WS not open. */
@@ -85,6 +95,7 @@ export function useVoiceSession(): UseVoiceSessionResult {
   const [metadata, setMetadata] = useState<SessionMetadata | null>(null);
   const [metrics, setMetrics] = useState<Metrics>(EMPTY_METRICS);
   const [transcripts, setTranscripts] = useState<Transcripts>(EMPTY_TRANSCRIPTS);
+  const [playbackUri, setPlaybackUri] = useState<string | null>(null);
 
   const clientRef = useRef<RealtimeClient | null>(null);
   const firstSentAtRef = useRef<number | null>(null);
@@ -93,6 +104,14 @@ export function useVoiceSession(): UseVoiceSessionResult {
    * almost certainly model audio and we can record TTFA. Lets us drop
    * the previous byte-count heuristic, which mis-fired on noisy sims. */
   const modelAudioBytesRef = useRef(0);
+  /** Per-turn PCM accumulator. We push each inlineData chunk's decoded
+   *  bytes here and flush to a WAV file on `turnComplete`. Cleared on
+   *  `interrupted` (user spoke before model finished) and on session
+   *  start/stop. */
+  const turnAudioChunksRef = useRef<Uint8Array[]>([]);
+  /** Monotonic per-session counter so each WAV file has a unique label
+   *  (helps debugging in the cache dir). */
+  const turnCounterRef = useRef(0);
 
   const sendChunk = useCallback((base64: string, byteLength: number) => {
     const client = clientRef.current;
@@ -115,9 +134,12 @@ export function useVoiceSession(): UseVoiceSessionResult {
     setError(null);
     setMetrics(EMPTY_METRICS);
     setTranscripts(EMPTY_TRANSCRIPTS);
+    setPlaybackUri(null);
     firstSentAtRef.current = null;
     ttfrRecordedRef.current = false;
     modelAudioBytesRef.current = 0;
+    turnAudioChunksRef.current = [];
+    turnCounterRef.current = 0;
     setPhase("starting");
 
     try {
@@ -161,26 +183,34 @@ export function useVoiceSession(): UseVoiceSessionResult {
           const sc = msg.serverContent;
           if (!sc) return;
 
+          // User transcript — filter sim hallucinations (Thai/Arabic/CJK
+          // junk produced by Gemini's STT on simulator noise). On a real
+          // device this filter passes English through cleanly.
           if (sc.inputTranscription?.text) {
             const delta = sc.inputTranscription.text;
-            setTranscripts((t) => ({ ...t, user: t.user + delta }));
+            if (isLikelyMeaningfulEnglish(delta)) {
+              setTranscripts((t) => ({ ...t, user: t.user + delta }));
+            }
           }
+          // Model transcript — always trust (model speaks English per
+          // language_code: en-US + system instruction).
           if (sc.outputTranscription?.text) {
             const delta = sc.outputTranscription.text;
             setTranscripts((t) => ({ ...t, model: t.model + delta }));
           }
 
-          // Audio playback path: each modelTurn.parts[*].inlineData is a
-          // PCM 24 kHz int16 mono chunk (base64). Day-4 just measures it;
-          // Day-5 will pipe into expo-audio AudioPlayer.
+          // Audio response path: each modelTurn.parts[*].inlineData is a
+          // PCM 24 kHz int16 mono chunk (base64). We accumulate per turn
+          // and flush to a WAV file on turnComplete (see below).
           const parts = sc.modelTurn?.parts;
           if (parts && parts.length > 0) {
             const now = performance.now();
             let audioBytesThisMsg = 0;
             for (const p of parts) {
               if (p.inlineData?.data) {
-                // base64 length × 3/4 is the decoded byte estimate.
-                audioBytesThisMsg += Math.floor(p.inlineData.data.length * 0.75);
+                const bytes = base64ToBytes(p.inlineData.data);
+                turnAudioChunksRef.current.push(bytes);
+                audioBytesThisMsg += bytes.byteLength;
               }
             }
             if (audioBytesThisMsg > 0) {
@@ -200,13 +230,37 @@ export function useVoiceSession(): UseVoiceSessionResult {
           }
 
           if (sc.turnComplete) {
+            const chunks = turnAudioChunksRef.current;
+            const totalBytes = modelAudioBytesRef.current;
             console.log(
-              `[voice] turnComplete (model audio total this turn: ${modelAudioBytesRef.current}B)`,
+              `[voice] turnComplete (model audio total this turn: ${totalBytes}B, ${chunks.length} chunks)`,
             );
+            if (chunks.length > 0 && totalBytes > 0) {
+              try {
+                const wav = buildWavFile(chunks);
+                turnCounterRef.current += 1;
+                const uri = writeTurnWavToCache(
+                  wav,
+                  `turn${turnCounterRef.current}`,
+                );
+                console.log(
+                  `[voice] wrote turn ${turnCounterRef.current} → ${uri.split("/").pop()} (${wav.byteLength}B WAV)`,
+                );
+                setPlaybackUri(uri);
+              } catch (err) {
+                console.warn("[voice] WAV write failed", err);
+              }
+            }
+            // Reset per-turn state regardless.
+            turnAudioChunksRef.current = [];
             modelAudioBytesRef.current = 0;
           }
           if (sc.interrupted) {
-            console.log("[voice] interrupted (user started speaking)");
+            console.log(
+              `[voice] interrupted (user started speaking) — dropping ${turnAudioChunksRef.current.length} pending audio chunks`,
+            );
+            turnAudioChunksRef.current = [];
+            modelAudioBytesRef.current = 0;
           }
         },
         onText: (text) => {
@@ -257,5 +311,5 @@ export function useVoiceSession(): UseVoiceSessionResult {
     };
   }, []);
 
-  return { phase, error, metadata, metrics, transcripts, start, stop, sendChunk };
+  return { phase, error, metadata, metrics, transcripts, playbackUri, start, stop, sendChunk };
 }

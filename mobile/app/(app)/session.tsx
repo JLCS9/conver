@@ -16,12 +16,13 @@ import {
   Text,
   View,
 } from "react-native";
+import { AudioPlayback } from "@/src/components/AudioPlayback";
 import { MicCapture } from "@/src/components/MicCapture";
 import { useVoiceSession } from "@/src/hooks/useVoiceSession";
 
 export default function SessionScreen() {
   const router = useRouter();
-  const { phase, error, metadata, metrics, transcripts, start, stop, sendChunk } = useVoiceSession();
+  const { phase, error, metadata, metrics, transcripts, playbackUri, start, stop, sendChunk } = useVoiceSession();
 
   const isLive = phase === "live";
   const isBusy = phase === "starting" || phase === "stopping";
@@ -99,7 +100,12 @@ export default function SessionScreen() {
         <View style={styles.transcriptsBox}>
           <Text style={styles.transcriptLabel}>Tú</Text>
           <Text style={styles.transcriptUser}>
-            {transcripts.user.trim() || (isLive ? "Escuchando…" : "—")}
+            {transcripts.user.trim() ||
+              (isLive
+                ? metrics.chunksSent > 30
+                  ? "(audio sin reconocer — el simulador no tiene mic real)"
+                  : "Escuchando…"
+                : "—")}
           </Text>
           <Text style={[styles.transcriptLabel, { marginTop: 12 }]}>Coach</Text>
           <Text style={styles.transcriptModel}>
@@ -108,10 +114,11 @@ export default function SessionScreen() {
         </View>
 
         <Text style={styles.note}>
-          Día 4: round-trip mic→Gemini→cliente verificado. Frames de Google
-          vienen como JSON-as-binary (no protobuf), parseamos con TextDecoder
-          + JSON.parse. Transcripts vivos arriba. Audio playback del modelo:
-          siguiente entrega.
+          Día 4: round-trip mic→Gemini→cliente + audio playback del modelo
+          activo. Frames de Google vienen como JSON-as-binary, parseamos
+          con TextDecoder + JSON.parse; PCM 24 kHz int16 → WAV → expo-audio
+          AudioPlayer. En simulador no hay mic real, pero el audio de
+          respuesta sí se reproducirá (cuando haya algo que reproducir).
         </Text>
 
         <Pressable
@@ -131,9 +138,16 @@ export default function SessionScreen() {
         </Pressable>
       </ScrollView>
 
-      {/* Mic capture mounts ONLY while live — keeps audio hook out of the
-          React tree until the WS handshake has already succeeded. */}
-      {isLive ? <MicCapture onChunk={sendChunk} /> : null}
+      {/* Mic capture + audio playback mount ONLY while live — keeps the
+          native audio hooks out of the React tree until the WS handshake
+          has already succeeded. AudioPlayback uses the latest playbackUri
+          state from useVoiceSession; each new URI triggers playback. */}
+      {isLive ? (
+        <>
+          <MicCapture onChunk={sendChunk} />
+          <AudioPlayback uri={playbackUri} />
+        </>
+      ) : null}
     </SafeAreaView>
   );
 }
