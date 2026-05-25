@@ -1,31 +1,15 @@
 // useVoiceSession — orchestrates a voice round-trip from the mobile client.
 //
-// Day-3 status: audio CAPTURE is temporarily disabled. The mic recorder
-// hook from @siteed/audio-studio installs an iOS recording-interruption
-// listener at mount that breaks NSURLSessionWebSocketTask on SDK 56 +
-// iOS 26.5 Sim (the WS closes with code=0 before the handshake completes).
-// We've proven via two diagnostic buttons in (app)/session.tsx (raw WS
-// to fake URL, real-auth WS to gateway) that the WS itself is fine when
-// the recorder hook is NOT in the React tree.
+// Day-4 status: WS path works end-to-end (Day-3 milestone). Mic capture
+// re-introduced via expo-audio's useAudioStream — BUT mounted in a child
+// component (`MicCapture`) that only renders when phase === "live". This
+// isolation pattern prevents the Day-2 bug where a top-level audio hook
+// installed an iOS recording-interruption listener at mount that killed
+// NSURLSessionWebSocketTask before the WS handshake completed.
 //
-// To unblock voice-loop development we (1) keep the WS path live so the
-// gateway sees real connections from the mobile and the server side can
-// be exercised end-to-end, (2) skip mic capture entirely so the recorder
-// hook doesn't poison the WS, and (3) park a TODO to switch to expo-audio's
-// recorder (we already installed it for setAudioModeAsync) in Day 4.
-//
-// What it does:
-//   1. Calls POST /api/realtime/session → gets { sessionId, wsUrl }.
-//   2. Opens a WS to our voice-gateway with `?token=<clerk_jwt>`.
-//   3. Configures the iOS audio session for duplex.
-//   4. Receives binary frames from upstream Gemini Live (proxied) and
-//      counts bytes + times the first one as the response-arrival proxy.
-//
-// Out of scope until audio recording is wired up:
-//   - Sending mic chunks to Google. The session is one-way (server → us)
-//     until then. Useful for measuring server-side latency in isolation.
-//   - Playback of received audio. Same protobuf-decode-on-gateway problem
-//     as before; we'll tackle once mic flows.
+// The hook exposes a `sendChunk(base64)` callback that the MicCapture
+// child uses to push PCM frames through the RealtimeClient WS without
+// having to know about the client directly.
 
 import { useAuth } from "@clerk/clerk-expo";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -34,9 +18,20 @@ import {
   configureForVoiceSession,
   releaseAudioSession,
 } from "@/src/services/voice/audioSession";
-import { RealtimeClient } from "@/src/services/voice/realtimeClient";
+import {
+  type GeminiServerMessage,
+  RealtimeClient,
+} from "@/src/services/voice/realtimeClient";
 
 type Phase = "idle" | "starting" | "live" | "stopping" | "ended" | "error";
+
+/** Running transcripts for the current session. Each string is a flat
+ * accumulation of all delta fragments Gemini has sent so far; we don't
+ * try to demarcate turns yet (UX call for Week 4 polish pass). */
+export interface Transcripts {
+  user: string;
+  model: string;
+}
 
 interface SessionMetadata {
   sessionId: string;
@@ -50,7 +45,7 @@ interface Metrics {
   chunksSent: number;
   bytesReceived: number;
   chunksReceived: number;
-  /** ms between WS open and first inbound binary frame >5kB. */
+  /** ms between first audio chunk SENT and first inbound binary >5kB. */
   timeToFirstResponseMs: number | null;
 }
 
@@ -59,8 +54,11 @@ export interface UseVoiceSessionResult {
   error: string | null;
   metadata: SessionMetadata | null;
   metrics: Metrics;
+  transcripts: Transcripts;
   start: () => Promise<void>;
   stop: () => Promise<void>;
+  /** Push a base64-encoded PCM chunk to the upstream. No-op if WS not open. */
+  sendChunk: (base64: string, byteLength: number) => void;
 }
 
 const EMPTY_METRICS: Metrics = {
@@ -70,6 +68,8 @@ const EMPTY_METRICS: Metrics = {
   chunksReceived: 0,
   timeToFirstResponseMs: null,
 };
+
+const EMPTY_TRANSCRIPTS: Transcripts = { user: "", model: "" };
 
 interface RealtimeSessionResponse {
   sessionId: string;
@@ -84,10 +84,29 @@ export function useVoiceSession(): UseVoiceSessionResult {
   const [error, setError] = useState<string | null>(null);
   const [metadata, setMetadata] = useState<SessionMetadata | null>(null);
   const [metrics, setMetrics] = useState<Metrics>(EMPTY_METRICS);
+  const [transcripts, setTranscripts] = useState<Transcripts>(EMPTY_TRANSCRIPTS);
 
   const clientRef = useRef<RealtimeClient | null>(null);
-  const wsOpenedAtRef = useRef<number | null>(null);
+  const firstSentAtRef = useRef<number | null>(null);
   const ttfrRecordedRef = useRef(false);
+  /** Counts inlineData parts we receive — once we have one >5 KB it's
+   * almost certainly model audio and we can record TTFA. Lets us drop
+   * the previous byte-count heuristic, which mis-fired on noisy sims. */
+  const modelAudioBytesRef = useRef(0);
+
+  const sendChunk = useCallback((base64: string, byteLength: number) => {
+    const client = clientRef.current;
+    if (!client) return;
+    client.sendAudioChunk(base64);
+    if (firstSentAtRef.current === null) {
+      firstSentAtRef.current = performance.now();
+    }
+    setMetrics((m) => ({
+      ...m,
+      chunksSent: m.chunksSent + 1,
+      bytesSent: m.bytesSent + byteLength,
+    }));
+  }, []);
 
   const start = useCallback(async () => {
     console.log("[voice] start() called, current phase=", phase);
@@ -95,8 +114,10 @@ export function useVoiceSession(): UseVoiceSessionResult {
 
     setError(null);
     setMetrics(EMPTY_METRICS);
-    wsOpenedAtRef.current = null;
+    setTranscripts(EMPTY_TRANSCRIPTS);
+    firstSentAtRef.current = null;
     ttfrRecordedRef.current = false;
+    modelAudioBytesRef.current = 0;
     setPhase("starting");
 
     try {
@@ -123,23 +144,70 @@ export function useVoiceSession(): UseVoiceSessionResult {
         wsUrl: session.wsUrl,
         bearer,
         onBinary: (data) => {
-          const now = performance.now();
-          setMetrics((m) => {
-            const next = {
-              ...m,
-              chunksReceived: m.chunksReceived + 1,
-              bytesReceived: m.bytesReceived + data.byteLength,
-            };
-            if (
-              !ttfrRecordedRef.current &&
-              wsOpenedAtRef.current !== null &&
-              data.byteLength > 5_000
-            ) {
-              ttfrRecordedRef.current = true;
-              next.timeToFirstResponseMs = now - wsOpenedAtRef.current;
+          // Raw-byte metrics only — semantic dispatch happens via
+          // onServerMessage below. Both fire for the same frame.
+          setMetrics((m) => ({
+            ...m,
+            chunksReceived: m.chunksReceived + 1,
+            bytesReceived: m.bytesReceived + data.byteLength,
+          }));
+        },
+        onServerMessage: (msg) => {
+          // Setup ACK — server is ready. Just log.
+          if (msg.setupComplete) {
+            console.log("[voice] setupComplete from upstream");
+            return;
+          }
+          const sc = msg.serverContent;
+          if (!sc) return;
+
+          if (sc.inputTranscription?.text) {
+            const delta = sc.inputTranscription.text;
+            setTranscripts((t) => ({ ...t, user: t.user + delta }));
+          }
+          if (sc.outputTranscription?.text) {
+            const delta = sc.outputTranscription.text;
+            setTranscripts((t) => ({ ...t, model: t.model + delta }));
+          }
+
+          // Audio playback path: each modelTurn.parts[*].inlineData is a
+          // PCM 24 kHz int16 mono chunk (base64). Day-4 just measures it;
+          // Day-5 will pipe into expo-audio AudioPlayer.
+          const parts = sc.modelTurn?.parts;
+          if (parts && parts.length > 0) {
+            const now = performance.now();
+            let audioBytesThisMsg = 0;
+            for (const p of parts) {
+              if (p.inlineData?.data) {
+                // base64 length × 3/4 is the decoded byte estimate.
+                audioBytesThisMsg += Math.floor(p.inlineData.data.length * 0.75);
+              }
             }
-            return next;
-          });
+            if (audioBytesThisMsg > 0) {
+              modelAudioBytesRef.current += audioBytesThisMsg;
+              if (
+                !ttfrRecordedRef.current &&
+                firstSentAtRef.current !== null
+              ) {
+                ttfrRecordedRef.current = true;
+                const ttfa = now - firstSentAtRef.current;
+                console.log(
+                  `[voice] TTFA: ${ttfa.toFixed(0)} ms (first model audio chunk, ${audioBytesThisMsg}B)`,
+                );
+                setMetrics((m) => ({ ...m, timeToFirstResponseMs: ttfa }));
+              }
+            }
+          }
+
+          if (sc.turnComplete) {
+            console.log(
+              `[voice] turnComplete (model audio total this turn: ${modelAudioBytesRef.current}B)`,
+            );
+            modelAudioBytesRef.current = 0;
+          }
+          if (sc.interrupted) {
+            console.log("[voice] interrupted (user started speaking)");
+          }
         },
         onText: (text) => {
           console.log("[voice] text frame:", text.slice(0, 200));
@@ -150,17 +218,16 @@ export function useVoiceSession(): UseVoiceSessionResult {
       });
       clientRef.current = client;
       await client.open();
-      wsOpenedAtRef.current = performance.now();
       console.log("[voice] step 3 done, WS open");
 
       console.log("[voice] step 4: configureForVoiceSession...");
       await configureForVoiceSession();
       console.log("[voice] step 4 done");
 
-      // TODO Day 4: mic capture via expo-audio's recorder API. Skipped on
-      // Day 3 because @siteed/audio-studio's useAudioRecorder() installs
-      // an iOS interruption listener at mount that breaks the WebSocket.
-      console.log("[voice] step 5 skipped (no audio capture in Day 3 build)");
+      // Step 5 (mic capture) lives in the <MicCapture> child component;
+      // it mounts when phase === "live" so its useAudioStream hook runs
+      // AFTER the WS is open. See (app)/session.tsx.
+      console.log("[voice] step 5 delegated to MicCapture (mounts on live)");
 
       setPhase("live");
     } catch (e) {
@@ -190,5 +257,5 @@ export function useVoiceSession(): UseVoiceSessionResult {
     };
   }, []);
 
-  return { phase, error, metadata, metrics, start, stop };
+  return { phase, error, metadata, metrics, transcripts, start, stop, sendChunk };
 }

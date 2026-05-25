@@ -2,15 +2,18 @@
 //
 // Protocol:
 //   - Open `wss://api.converflow.tech/voice?sessionId=<uuid>` with the
-//     Clerk JWT in the `Sec-WebSocket-Protocol` header as `Bearer.<jwt>`.
+//     Clerk JWT carried as `?token=<jwt>` (subprotocol header has shipped
+//     buggy on RN/iOS — see comment below).
 //   - Gateway authenticates, opens upstream to Gemini Live, sends the
 //     server-side setup. We don't have to send any setup ourselves — the
-//     gateway has its own system prompt and model config.
+//     gateway owns the system prompt + model config.
 //   - We send audio chunks as JSON: `{ realtime_input: { media_chunks: [
 //       { mime_type: 'audio/pcm', data: '<base64 PCM16 16kHz mono>' } ]}}`.
-//   - We receive whatever Google sends — protobuf binary frames containing
-//     PCM 24 kHz audio + transcripts + turn signals. The caller is
-//     responsible for decoding/playing those.
+//   - We receive Google's responses. CONFIRMED (Day 4 hex dump): Gemini's
+//     v1beta `BidiGenerateContent` endpoint sends **JSON encoded with the
+//     WebSocket BINARY opcode**, not protobuf and not text. So we decode
+//     UTF-8 + JSON.parse every inbound binary frame and dispatch typed
+//     `ServerMessage` events to the caller.
 //
 // State machine:
 //   idle → connecting → open → closing → closed
@@ -24,19 +27,90 @@ export type RealtimeStatus =
   | "closed"
   | "errored";
 
+/**
+ * Gemini Live BidiGenerateContent server-message shape (subset we care about).
+ * Spec lives at https://ai.google.dev/api/live but the protobuf field names
+ * arrive as camelCase JSON over the wire.
+ */
+export interface GeminiInlineData {
+  /** e.g. "audio/pcm;rate=24000" for model audio output. */
+  mimeType?: string;
+  /** Base64-encoded payload. For audio, raw PCM int16 LE samples. */
+  data?: string;
+}
+
+export interface GeminiPart {
+  text?: string;
+  inlineData?: GeminiInlineData;
+}
+
+export interface GeminiTranscription {
+  /** Incremental text fragment (delta), not the full transcript. */
+  text?: string;
+  finished?: boolean;
+}
+
+export interface GeminiServerContent {
+  modelTurn?: { parts?: GeminiPart[]; role?: string };
+  /** Live transcription of the user's microphone input. */
+  inputTranscription?: GeminiTranscription;
+  /** Live transcription of the model's audio output. */
+  outputTranscription?: GeminiTranscription;
+  /** Model has finished its current turn. */
+  turnComplete?: boolean;
+  /** Server-side VAD detected the user starting to speak — cancel any
+   * pending playback to honor barge-in. */
+  interrupted?: boolean;
+  generationComplete?: boolean;
+}
+
+export interface GeminiServerMessage {
+  setupComplete?: Record<string, unknown>;
+  serverContent?: GeminiServerContent;
+  usageMetadata?: Record<string, unknown>;
+  toolCall?: Record<string, unknown>;
+}
+
 export interface RealtimeClientOptions {
   wsUrl: string;
   bearer: string;
   onStatus?: (status: RealtimeStatus) => void;
+  /** Raw binary frame (after Blob→ArrayBuffer normalization). Used for
+   * byte-count metrics. Fires for every binary frame, including those
+   * we also dispatch via `onServerMessage`. */
   onBinary?: (data: ArrayBuffer) => void;
+  /** Parsed Gemini server message. Only fires when the binary frame is
+   * valid JSON. If JSON parse fails, falls through to `onBinary` only. */
+  onServerMessage?: (msg: GeminiServerMessage) => void;
+  /** True text frames (rare — Google uses binary opcode for JSON). */
   onText?: (text: string) => void;
   onError?: (err: unknown) => void;
+}
+
+/** Dumps first ~200B of a binary frame as ASCII + hex so we can identify
+ * the payload format (JSON encoded as bytes vs protobuf vs raw PCM). */
+function debugDumpBinary(label: string, data: ArrayBuffer): void {
+  const bytes = new Uint8Array(data);
+  const previewLen = Math.min(200, bytes.length);
+  let asAscii = "";
+  for (let i = 0; i < previewLen; i++) {
+    const b = bytes[i];
+    asAscii += b >= 32 && b < 127 ? String.fromCharCode(b) : ".";
+  }
+  let asHex = "";
+  for (let i = 0; i < Math.min(64, previewLen); i++) {
+    asHex += bytes[i].toString(16).padStart(2, "0") + " ";
+  }
+  console.log(`[ws] ${label} ${data.byteLength}B`);
+  console.log(`[ws]   ascii: ${asAscii}`);
+  console.log(`[ws]   hex(64): ${asHex}`);
 }
 
 export class RealtimeClient {
   private ws: WebSocket | null = null;
   private status: RealtimeStatus = "idle";
   private readonly opts: RealtimeClientOptions;
+  private binaryFrameCounter = 0;
 
   constructor(opts: RealtimeClientOptions) {
     this.opts = opts;
@@ -45,6 +119,37 @@ export class RealtimeClient {
   private setStatus(s: RealtimeStatus) {
     this.status = s;
     this.opts.onStatus?.(s);
+  }
+
+  /** Decode a binary frame as UTF-8 JSON and dispatch the typed event.
+   * Returns true if parsing succeeded so the caller can decide whether to
+   * also surface the raw bytes (e.g. for byte-count metrics). We always
+   * surface raw bytes — JSON parse is best-effort. */
+  private tryDispatchServerMessage(data: ArrayBuffer): void {
+    if (!this.opts.onServerMessage) return;
+    let text: string;
+    try {
+      // TextDecoder is available in Hermes (RN 0.72+). expo-router and
+      // Clerk both rely on it, so we don't need a polyfill.
+      text = new TextDecoder("utf-8").decode(data);
+    } catch (err) {
+      console.warn("[ws] TextDecoder failed on binary frame", err);
+      return;
+    }
+    let msg: GeminiServerMessage;
+    try {
+      msg = JSON.parse(text) as GeminiServerMessage;
+    } catch {
+      // Not JSON — could be a future protobuf frame or partial. Silently
+      // skip (raw bytes still flow through onBinary for metrics).
+      return;
+    }
+    try {
+      this.opts.onServerMessage(msg);
+    } catch (err) {
+      // Caller threw — surface but don't kill the WS pipe.
+      console.warn("[ws] onServerMessage handler threw", err);
+    }
   }
 
   open(timeoutMs = 12_000): Promise<void> {
@@ -117,15 +222,32 @@ export class RealtimeClient {
       ws.onmessage = (event) => {
         const data = event.data;
         if (typeof data === "string") {
+          // First text frame is usually `{"setupComplete":{}}` — log it
+          // verbatim so we can confirm the handshake actually completed.
           this.opts.onText?.(data);
         } else if (data instanceof ArrayBuffer) {
+          this.binaryFrameCounter += 1;
+          // Dump the first 3 binary frames so we can identify the wire
+          // format if Google ever changes the encoding. Kept as a
+          // canary; cheap (<= 3 calls per session).
+          if (this.binaryFrameCounter <= 3) {
+            debugDumpBinary(`bin frame #${this.binaryFrameCounter}`, data);
+          }
           this.opts.onBinary?.(data);
+          this.tryDispatchServerMessage(data);
         } else if (
           typeof Blob !== "undefined" &&
           data instanceof Blob
         ) {
           // React Native sometimes hands binary frames as Blob. Convert.
-          data.arrayBuffer().then((buf) => this.opts.onBinary?.(buf));
+          data.arrayBuffer().then((buf) => {
+            this.binaryFrameCounter += 1;
+            if (this.binaryFrameCounter <= 3) {
+              debugDumpBinary(`bin frame #${this.binaryFrameCounter} (blob)`, buf);
+            }
+            this.opts.onBinary?.(buf);
+            this.tryDispatchServerMessage(buf);
+          });
         } else {
           // Fallback: try generic Buffer-like
           try {

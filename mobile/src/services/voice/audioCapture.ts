@@ -1,58 +1,46 @@
-// Microphone capture wrapper around @siteed/audio-studio.
+// Microphone capture wrapper around expo-audio's useAudioStream.
 //
-// Emits PCM 16-bit mono 16 kHz chunks via callback at the configured
-// interval (50 ms default → 800 samples per chunk → 1600 bytes of PCM →
-// ~2.1 KB base64). That matches Gemini Live's expected input format.
+// expo-audio (SDK 56+) exposes a real streaming PCM API via its `AudioStream`
+// class + `useAudioStream` hook — `int16` encoding + onBuffer(ArrayBuffer)
+// callback. That's exactly the shape Gemini Live wants for input.
 //
-// The actual recording lifecycle is owned by the caller via the hook
-// returned from `useAudioRecorder` in the package. This file just centralizes
-// the recording config + start/stop helpers so the screen/hook doesn't
-// import the package directly.
+// We deliberately do NOT call useAudioStream from useVoiceSession's top-level
+// hook. The Day-3 investigation showed that @siteed/audio-studio's
+// useAudioRecorder() installed an iOS recording-interruption listener at
+// mount time that broke NSURLSessionWebSocketTask. To stay safe, we render
+// the consumer (`MicCapture` component) ONLY after the WS is already open
+// — so any native side effect of useAudioStream is observed by the gateway
+// after the connection is established, not before.
 //
-// audio-studio is the renamed canonical of @siteed/expo-audio-stream (which
-// was deprecated and then renamed twice). Same maintainer, same surface.
+// This file just centralizes the encoding constants + the base64 helper
+// since `Buffer` isn't on the global in RN 0.85's Hermes (was earlier).
 
-import type {
-  AudioDataEvent,
-  RecordingConfig,
-} from "@siteed/audio-studio";
-
-/**
- * Recording config tuned for Gemini Live input: PCM 16-bit, mono, 16 kHz,
- * 50 ms chunk interval, no waveform analysis (we don't render a viz in v1).
- *
- * iOS audio session is configured separately via `audioSession.ts` so the
- * settings apply across the whole module (both recording and playback).
- */
-export const GEMINI_RECORDING_CONFIG: RecordingConfig = {
-  sampleRate: 16000,
+/** Gemini Live's expected input format: PCM 16-bit mono 16 kHz LE. */
+export const GEMINI_STREAM_OPTIONS = {
+  sampleRate: 16_000,
   channels: 1,
-  encoding: "pcm_16bit",
-  interval: 50,
-  keepAwake: true,
-  showNotification: false,
-  enableProcessing: false,
-  ios: {
-    audioSession: {
-      category: "PlayAndRecord",
-      mode: "VoiceChat", // enables hardware AEC — essential for duplex
-      categoryOptions: [
-        "DefaultToSpeaker",
-        "AllowBluetooth",
-        "AllowBluetoothA2DP",
-      ],
-    },
-  },
+  encoding: "int16" as const,
 };
 
 /**
- * Coerces the chunk payload from @siteed/expo-audio-stream into the base64
- * string Gemini expects. On native iOS the event ships PCM as a base64
- * string already; on web it's a Float32Array we'd have to convert. We only
- * support native in v1, so this guards the type without doing extra work.
+ * Converts an ArrayBuffer to a base64 string without depending on Buffer
+ * or btoa being on the runtime global (Hermes ships btoa in recent RN,
+ * but we keep this self-contained for portability).
+ *
+ * Chunks the conversion to avoid call-stack overflow on large buffers —
+ * String.fromCharCode.apply with too many args throws "Maximum call stack
+ * size exceeded".
  */
-export function chunkToBase64(event: AudioDataEvent): string | null {
-  if (typeof event.data === "string") return event.data;
-  // Web/Float32Array path — not used in v1 mobile flow.
-  return null;
+export function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000; // 32 KB at a time
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(
+      null,
+      Array.from(bytes.subarray(i, i + chunkSize)),
+    );
+  }
+  // global.btoa exists in Hermes / RN 0.85.
+  return btoa(binary);
 }

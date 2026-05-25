@@ -16,11 +16,12 @@ import {
   Text,
   View,
 } from "react-native";
+import { MicCapture } from "@/src/components/MicCapture";
 import { useVoiceSession } from "@/src/hooks/useVoiceSession";
 
 export default function SessionScreen() {
   const router = useRouter();
-  const { phase, error, metadata, metrics, start, stop } = useVoiceSession();
+  const { phase, error, metadata, metrics, transcripts, start, stop, sendChunk } = useVoiceSession();
 
   const isLive = phase === "live";
   const isBusy = phase === "starting" || phase === "stopping";
@@ -95,10 +96,22 @@ export default function SessionScreen() {
 
         {error ? <Text style={styles.errorText}>{error}</Text> : null}
 
+        <View style={styles.transcriptsBox}>
+          <Text style={styles.transcriptLabel}>Tú</Text>
+          <Text style={styles.transcriptUser}>
+            {transcripts.user.trim() || (isLive ? "Escuchando…" : "—")}
+          </Text>
+          <Text style={[styles.transcriptLabel, { marginTop: 12 }]}>Coach</Text>
+          <Text style={styles.transcriptModel}>
+            {transcripts.model.trim() || (isLive ? "Esperando turno…" : "—")}
+          </Text>
+        </View>
+
         <Text style={styles.note}>
-          Día 3: mic capture desactivado (@siteed/audio-studio rompe el WS en
-          iOS 26.5 Sim). Esta pantalla mide WS → gateway → upstream Google de
-          ida. Mic + audio playback se cablean en Día 4 con expo-audio.
+          Día 4: round-trip mic→Gemini→cliente verificado. Frames de Google
+          vienen como JSON-as-binary (no protobuf), parseamos con TextDecoder
+          + JSON.parse. Transcripts vivos arriba. Audio playback del modelo:
+          siguiente entrega.
         </Text>
 
         <Pressable
@@ -117,6 +130,10 @@ export default function SessionScreen() {
           )}
         </Pressable>
       </ScrollView>
+
+      {/* Mic capture mounts ONLY while live — keeps audio hook out of the
+          React tree until the WS handshake has already succeeded. */}
+      {isLive ? <MicCapture onChunk={sendChunk} /> : null}
     </SafeAreaView>
   );
 }
@@ -162,6 +179,33 @@ const styles = StyleSheet.create({
   metricValue: { fontSize: 15, fontWeight: "600", color: "#0f172a" },
   metricValueHi: { color: "#059669" },
   errorText: { fontSize: 13, color: "#dc2626", marginTop: 4 },
+  transcriptsBox: {
+    marginTop: 12,
+    padding: 14,
+    backgroundColor: "#f8fafc",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  transcriptLabel: {
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 1,
+    color: "#64748b",
+    textTransform: "uppercase",
+  },
+  transcriptUser: {
+    fontSize: 14,
+    color: "#0f172a",
+    marginTop: 4,
+    lineHeight: 20,
+  },
+  transcriptModel: {
+    fontSize: 14,
+    color: "#0ea5e9",
+    marginTop: 4,
+    lineHeight: 20,
+  },
   note: { fontSize: 12, color: "#64748b", lineHeight: 18, marginTop: 8 },
   button: {
     borderRadius: 14,
