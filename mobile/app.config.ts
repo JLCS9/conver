@@ -28,11 +28,13 @@ const config: ExpoConfig = {
     // the binary can register for APNs in TestFlight/prod. The iOS Simulator
     // doesn't deliver real APNs, so dev push testing happens on TestFlight.
     "expo-notifications",
-    // @siteed/expo-audio-stream config plugin: autolinks the native module
-    // and wires NSMicrophoneUsageDescription / background audio if we set it.
-    // (We already declared NSMicrophoneUsageDescription in infoPlist above —
-    // the plugin won't overwrite it.)
-    "@siteed/expo-audio-stream",
+    // @siteed/audio-studio config plugin (renamed from expo-audio-stream).
+    // Autolinks the native module + wires NSMicrophoneUsageDescription / bg
+    // audio if we set it. We already declared NSMicrophoneUsageDescription
+    // in infoPlist above; the plugin won't overwrite it.
+    "@siteed/audio-studio",
+    // expo-audio plugin: needed for setAudioModeAsync + Player on SDK 56+.
+    "expo-audio",
   ],
   experiments: {
     typedRoutes: true,

@@ -1,37 +1,41 @@
 // iOS audio session configuration for the voice feature.
 //
-// `PlayAndRecord` + `voiceChat` is the combo that:
+// The combo we want under the hood is `PlayAndRecord` + `voiceChat` mode:
 //   - Lets the mic and speaker coexist (needed for our duplex pipe).
 //   - Enables iOS's native acoustic echo cancellation (AEC) so the model's
 //     output doesn't bleed back into the mic, which would create a feedback
 //     loop and confuse VAD.
 //   - Routes audio to the speaker by default rather than the earpiece.
-//   - Permits Bluetooth devices (AirPods, headphones) so the user can use
-//     whatever they have on.
+//   - Permits Bluetooth devices (AirPods, headphones) so the user has flexibility.
 //
-// The actual call to set the audio mode happens via expo-av (which we install
-// for half-duplex playback in Day 2) — both expo-av and @siteed/expo-audio-
-// stream share iOS AVAudioSession under the hood, so configuring one applies
-// to the other.
+// expo-audio (SDK 56+) exposes a simplified cross-platform AudioMode that
+// configures the iOS AVAudioSession internally. The category/mode/options
+// switch to PlayAndRecord+VoiceChat happens implicitly when allowsRecording
+// is true and shouldRouteThroughEarpiece is false. @siteed/audio-studio
+// shares the same AVAudioSession, so configuring once applies to both
+// recording and playback.
 
-import { Audio, InterruptionModeIOS } from "expo-av";
+import { setAudioModeAsync } from "expo-audio";
 
 export async function configureForVoiceSession(): Promise<void> {
-  await Audio.setAudioModeAsync({
-    allowsRecordingIOS: true,
-    playsInSilentModeIOS: true,
-    // DoNotMix is the safe choice for a tutoring app — if the user has
-    // music playing, our session takes over and pauses it.
-    interruptionModeIOS: InterruptionModeIOS.DoNotMix,
-    shouldDuckAndroid: true,
-    playThroughEarpieceAndroid: false,
-    staysActiveInBackground: false, // not needed in v1; would require a background-audio mode declaration
+  await setAudioModeAsync({
+    allowsRecording: true,
+    playsInSilentMode: true,
+    // 'doNotMix' = exclusive audio focus. If the user has music playing,
+    // our session takes over.
+    interruptionMode: "doNotMix",
+    shouldPlayInBackground: false, // would require background-audio entitlement
+    shouldRouteThroughEarpiece: false, // route to speaker
+    allowsBackgroundRecording: false,
   });
 }
 
 export async function releaseAudioSession(): Promise<void> {
-  await Audio.setAudioModeAsync({
-    allowsRecordingIOS: false,
-    playsInSilentModeIOS: false,
+  await setAudioModeAsync({
+    allowsRecording: false,
+    playsInSilentMode: false,
+    interruptionMode: "mixWithOthers",
+    shouldPlayInBackground: false,
+    shouldRouteThroughEarpiece: false,
   });
 }

@@ -1,4 +1,4 @@
-// Microphone capture wrapper around @siteed/expo-audio-stream.
+// Microphone capture wrapper around @siteed/audio-studio.
 //
 // Emits PCM 16-bit mono 16 kHz chunks via callback at the configured
 // interval (50 ms default → 800 samples per chunk → 1600 bytes of PCM →
@@ -8,11 +8,14 @@
 // returned from `useAudioRecorder` in the package. This file just centralizes
 // the recording config + start/stop helpers so the screen/hook doesn't
 // import the package directly.
+//
+// audio-studio is the renamed canonical of @siteed/expo-audio-stream (which
+// was deprecated and then renamed twice). Same maintainer, same surface.
 
 import type {
   AudioDataEvent,
   RecordingConfig,
-} from "@siteed/expo-audio-stream";
+} from "@siteed/audio-studio";
 
 /**
  * Recording config tuned for Gemini Live input: PCM 16-bit, mono, 16 kHz,

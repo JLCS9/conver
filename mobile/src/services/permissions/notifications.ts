@@ -33,7 +33,6 @@ export async function requestNotificationPermission(): Promise<PermissionResult>
       allowAlert: true,
       allowBadge: true,
       allowSound: true,
-      allowAnnouncements: false,
     },
   });
 
