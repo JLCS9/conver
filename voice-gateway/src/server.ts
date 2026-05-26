@@ -1,15 +1,16 @@
-// Voice-gateway entry point — Day 1 final shape.
+// Voice-gateway entry point — Day 6 hybrid stack shape.
 //
 // Connection flow on `/voice?sessionId=<uuid>`:
-//   1. Extract Clerk JWT from Sec-WebSocket-Protocol (`Bearer.<jwt>`).
+//   1. Extract Clerk JWT from `?token=` (legacy: Sec-WebSocket-Protocol).
 //   2. Verify the JWT via @clerk/backend — fast, JWKS cached.
 //   3. Look up sessionId in public.sessions, validate it belongs to the
 //      Clerk user and that it's status='active'.
-//   4. Open upstream WS to Google Gemini Live, send the setup message
-//      (system prompt + audio formats + transcription on).
-//   5. Bidirectional pipe between client and upstream.
+//   4. Spin up a Conversation (Deepgram STT → Gemini Flash text →
+//      ElevenLabs TTS pipeline). Conversation owns its own state and
+//      lifecycle.
+//   5. Pipe inbound WS frames into Conversation.handleClientMessage.
 //   6. On close from either side: mark session completed/aborted with
-//      observed duration, close the other side.
+//      observed duration, close the Conversation.
 
 import { createServer, type IncomingMessage } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
@@ -22,7 +23,7 @@ import {
   markSessionAborted,
   markSessionCompleted,
 } from "./supabase.js";
-import { openUpstream } from "./upstream.js";
+import { Conversation } from "./conversation.js";
 
 const env = loadEnv();
 
@@ -126,27 +127,21 @@ wss.on("connection", async (clientWs, request) => {
   const startedAt = Date.now();
   const log = logger.child({ sessionId });
 
-  log.info("client connected, opening upstream");
+  log.info("client connected, starting Conversation pipeline");
 
-  let upstreamWs: WebSocket | null = null;
   let closed = false;
+  const conversation = new Conversation(clientWs, log);
 
   const observedDurationSeconds = () => (Date.now() - startedAt) / 1000;
 
-  const finalize = async (reason: "client_close" | "upstream_close" | "error", err?: unknown) => {
+  const finalize = async (reason: "client_close" | "error", err?: unknown) => {
     if (closed) return;
     closed = true;
 
     const dur = observedDurationSeconds();
+    conversation.close();
     try {
       if (clientWs.readyState === WebSocket.OPEN) clientWs.close();
-    } catch {
-      /* ignore */
-    }
-    try {
-      if (upstreamWs && upstreamWs.readyState === WebSocket.OPEN) {
-        upstreamWs.close();
-      }
     } catch {
       /* ignore */
     }
@@ -167,26 +162,16 @@ wss.on("connection", async (clientWs, request) => {
   };
 
   try {
-    const upstream = await openUpstream();
-    upstreamWs = upstream.ws;
+    await conversation.start();
   } catch (err) {
     await finalize("error", err);
     return;
   }
 
-  // Bidirectional pipe. Raw forwarding — gateway doesn't parse audio
-  // chunks today (cost tracking via byte counts lands in Commit 6 or
-  // Day 3). isBinary preserved so binary frames stay binary.
+  // Forward inbound WS frames into the Conversation. The Conversation
+  // owns all the side effects (STT routing, LLM, TTS) from this point.
   clientWs.on("message", (data, isBinary) => {
-    if (upstreamWs && upstreamWs.readyState === WebSocket.OPEN) {
-      upstreamWs.send(data, { binary: isBinary });
-    }
-  });
-
-  upstreamWs.on("message", (data, isBinary) => {
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.send(data, { binary: isBinary });
-    }
+    conversation.handleClientMessage(data, isBinary);
   });
 
   clientWs.on("close", (code, reason) => {
@@ -202,24 +187,7 @@ wss.on("connection", async (clientWs, request) => {
       );
     }
   });
-  upstreamWs.on("close", (code, reason) => {
-    // Upstream close with code 1000 = Gemini decided the session is over
-    // (e.g., max duration hit, model side completion). Anything else =
-    // Gemini error: rate limit, model unavailable, server bounce.
-    if (code === 1000) {
-      void finalize("upstream_close");
-    } else {
-      void finalize(
-        "error",
-        new Error(`upstream closed abnormally: code=${code} reason=${reason?.toString() ?? ""}`),
-      );
-    }
-  });
-
   clientWs.on("error", (err) => {
-    void finalize("error", err);
-  });
-  upstreamWs.on("error", (err) => {
     void finalize("error", err);
   });
 });

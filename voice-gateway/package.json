@@ -1,8 +1,8 @@
 {
   "name": "converflow-voice-gateway",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "WebSocket gateway that proxies mobile voice sessions to Google Gemini Live.",
+  "description": "WebSocket gateway that orchestrates Deepgram STT + Gemini text + ElevenLabs TTS for mobile voice sessions.",
   "type": "module",
   "main": "dist/server.js",
   "scripts": {
@@ -13,6 +13,8 @@
   },
   "dependencies": {
     "@clerk/backend": "^1.13.0",
+    "@deepgram/sdk": "^3.9.0",
+    "@google/genai": "^0.7.0",
     "@supabase/supabase-js": "^2.45.0",
     "pino": "^9.5.0",
     "ws": "^8.18.0",
