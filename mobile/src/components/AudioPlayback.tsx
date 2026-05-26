@@ -75,10 +75,31 @@ function AudioPlaybackInner({
       onEndRef.current?.();
     };
 
+    // Safety net for when isLoaded never fires (codec error, missing
+    // file, etc.). Cleared as soon as the happy path runs.
+    let loadTimeout: NodeJS.Timeout | null = setTimeout(() => {
+      sub.remove();
+      loadTimeout = null;
+      try {
+        player.play();
+      } catch {
+        /* ignore */
+      }
+      console.warn(`[playback] no isLoaded after 1s for ${label}`);
+      fireStart();
+      // Without a duration estimate, wait 5s before re-engaging mic.
+      endTimer = setTimeout(fireEnd, 5000);
+    }, 1000);
+
     // Listen for the load event to get the actual duration, then play
     // and schedule the end fire.
     const sub = player.addListener("playbackStatusUpdate", (status) => {
       if (!status.isLoaded) return;
+      // Cancel the safety timer — we got isLoaded in time.
+      if (loadTimeout) {
+        clearTimeout(loadTimeout);
+        loadTimeout = null;
+      }
       try {
         // Re-enforce speakerphone before each playback (Day 5-F).
         InCallManager.setForceSpeakerphoneOn(true);
@@ -103,22 +124,6 @@ function AudioPlaybackInner({
       }
       sub.remove(); // one-shot
     });
-
-    // Safety: if `isLoaded` doesn't fire within 1s, kick play() anyway
-    // and arbitrarily release the gate so the mic doesn't deadlock.
-    const loadTimeout = setTimeout(() => {
-      sub.remove();
-      try {
-        player.play();
-      } catch {
-        /* ignore */
-      }
-      console.warn(`[playback] no isLoaded after 1s for ${label}`);
-      fireStart();
-      // Without a duration estimate we just wait 5s before re-engaging
-      // mic. Belt-and-braces.
-      endTimer = setTimeout(fireEnd, 5000);
-    }, 1000);
 
     try {
       player.replace({ uri });

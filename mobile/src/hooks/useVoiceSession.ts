@@ -88,6 +88,13 @@ interface RealtimeSessionResponse {
 export function useVoiceSession(): UseVoiceSessionResult {
   const { getToken } = useAuth();
   const [phase, setPhase] = useState<Phase>("idle");
+
+  // Debug: trace every phase transition. If the session "blocks", knowing
+  // which state we slipped into (and from what) is the difference between
+  // a 5-minute fix and 5 days of guessing.
+  useEffect(() => {
+    console.log(`[voice] phase → ${phase}`);
+  }, [phase]);
   const [error, setError] = useState<string | null>(null);
   const [metadata, setMetadata] = useState<SessionMetadata | null>(null);
   const [metrics, setMetrics] = useState<Metrics>(EMPTY_METRICS);

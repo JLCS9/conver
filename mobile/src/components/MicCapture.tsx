@@ -33,6 +33,14 @@ interface MicCaptureProps {
 }
 
 function MicCaptureInner({ onChunk, paused = false }: MicCaptureProps) {
+  // Mount/unmount trace — if MicCapture unmounts unexpectedly while
+  // phase is still "live", that's the signal something in the parent
+  // chain is forcing it to re-mount (e.g. unstable JSX position, key
+  // changes, or audio session conflicts torpedoing the native stream).
+  useEffect(() => {
+    console.log("[MicCapture] MOUNTED");
+    return () => console.log("[MicCapture] UNMOUNTED");
+  }, []);
   // Store the callback in a ref so the onBuffer closure stays stable —
   // expo-audio's hook re-reads options object on every render otherwise,
   // and we don't want to thrash native bindings. Assignment lives inside
