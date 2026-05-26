@@ -1,11 +1,25 @@
-// AudioPlayback — owns the expo-audio AudioPlayer instance and plays
-// per-turn Gemini WAV files as they arrive.
+// AudioPlayback — plays Gemini's per-turn WAV files and signals the
+// parent when the coach starts/stops speaking so the mic can be
+// muted to prevent echo.
 //
-// Day 6-L: now also fires `onPlaybackStart` / `onPlaybackEnd` props
-// so the parent can gate the mic during coach speech. The parent
-// (session.tsx) flips a `coachIsSpeaking` flag and MicCapture drops
-// chunks while that flag is true → kills the speaker → mic echo loop
-// without the server having to estimate timing.
+// Day 6-N strategy (after Day 6-L/M event-tracking fragility):
+//
+//   forget event tracking. Use a plain setTimeout sized to the audio
+//   duration. The pattern per turn is:
+//
+//     player.replace(uri)
+//     wait for `isLoaded` (gives us status.duration)
+//     player.play() + fire onPlaybackStart()
+//     schedule setTimeout(duration_ms + 200) → fire onPlaybackEnd()
+//
+//   No reliance on `playing` transitions or `didJustFinish` (both of
+//   which the SDK doesn't always emit cleanly between rapid replaces).
+//   The +200ms buffer covers the gap between play() call and audio
+//   actually starting on the speaker.
+//
+//   Safety net: if `isLoaded` itself doesn't fire within 1s (codec
+//   error / missing file), we fall back to firing both START and END
+//   together so the parent doesn't get stuck with the mic paused.
 
 import { useAudioPlayer } from "expo-audio";
 import { memo, useEffect, useRef } from "react";
@@ -15,12 +29,10 @@ interface AudioPlaybackProps {
   /** file:// URI of the most recently-assembled turn WAV, or null while
    *  no audio is queued. Each non-null change triggers playback. */
   uri: string | null;
-  /** Fired the moment AudioPlayer signals isLoaded + we call play().
-   *  Parent flips `coachIsSpeaking` here. */
+  /** Fired the moment we call player.play() on a new URI. */
   onPlaybackStart?: () => void;
-  /** Fired when AudioPlayer signals the playback transitioned from
-   *  playing → not-playing (i.e. it finished or was stopped). Parent
-   *  flips `coachIsSpeaking` back so the mic resumes feeding Deepgram. */
+  /** Fired (duration + 200ms) after onPlaybackStart, i.e. the exact
+   *  moment playback should be finishing on the speaker. */
   onPlaybackEnd?: () => void;
 }
 
@@ -29,21 +41,11 @@ function AudioPlaybackInner({
   onPlaybackStart,
   onPlaybackEnd,
 }: AudioPlaybackProps) {
-  // Stable player: created once at mount with no source. We feed it
-  // sources via `.replace()` so we keep the same native instance across
-  // many turns instead of churning native players (which would cost
-  // ~50-100 ms per swap on iOS for engine setup).
-  //
-  // updateInterval: 100ms so playback status events fire often enough
-  // to detect playback end within ~100ms (default 500ms feels laggy
-  // for the mic re-engage hand-off).
-  const player = useAudioPlayer(null, { updateInterval: 100 });
+  const player = useAudioPlayer(null);
   const lastPlayedUriRef = useRef<string | null>(null);
-  const wasPlayingRef = useRef(false);
 
-  // Stable callbacks: the parent passes new arrow functions each render
-  // (`() => setCoachIsSpeaking(true)`). Ref keeps the latest closure
-  // accessible from the long-lived playbackStatusUpdate listener.
+  // Stable callback refs so the per-URI effect can read the latest
+  // closure without re-running on every parent render.
   const onStartRef = useRef(onPlaybackStart);
   const onEndRef = useRef(onPlaybackEnd);
   useEffect(() => {
@@ -51,140 +53,93 @@ function AudioPlaybackInner({
     onEndRef.current = onPlaybackEnd;
   }, [onPlaybackStart, onPlaybackEnd]);
 
-  // Persistent listener for the lifetime of the player.
-  //
-  // Day 6-M: use expo-audio's explicit `didJustFinish` flag for the
-  // end signal. Tracking `playing: true → false` transitions misses
-  // edges (the SDK doesn't always emit a status with playing=false on
-  // turn end, especially if a new replace() is queued immediately).
-  // didJustFinish is the SDK's "audio ended this tick" boolean and is
-  // the canonical signal.
-  //
-  // Safety net: if didJustFinish somehow doesn't fire for a turn
-  // (rare, but possible on app backgrounding or audio interruption),
-  // a setTimeout scheduled when the turn STARTS guarantees the end
-  // event fires anyway after (duration + 1s). The user can't get
-  // stuck with the mic paused forever.
-  const safetyEndTimerRef = useRef<NodeJS.Timeout | null>(null);
-
-  useEffect(() => {
-    const sub = player.addListener("playbackStatusUpdate", (status) => {
-      if (!status.isLoaded) return;
-
-      // Detect playback START (transition false → true).
-      if (status.playing && !wasPlayingRef.current) {
-        wasPlayingRef.current = true;
-        console.log(
-          `[playback] started (duration=${status.duration.toFixed(2)}s)`,
-        );
-        onStartRef.current?.();
-
-        // Schedule a safety end-fire in case didJustFinish gets lost.
-        if (safetyEndTimerRef.current) {
-          clearTimeout(safetyEndTimerRef.current);
-        }
-        const safetyMs = Math.max(1000, status.duration * 1000 + 1000);
-        safetyEndTimerRef.current = setTimeout(() => {
-          if (wasPlayingRef.current) {
-            console.warn(
-              "[playback] safety timer fired — forcing onPlaybackEnd",
-            );
-            wasPlayingRef.current = false;
-            onEndRef.current?.();
-          }
-        }, safetyMs);
-      }
-
-      // Detect playback END via didJustFinish (the SDK's canonical
-      // "this tick is the moment the audio finished" signal).
-      if (status.didJustFinish && wasPlayingRef.current) {
-        wasPlayingRef.current = false;
-        if (safetyEndTimerRef.current) {
-          clearTimeout(safetyEndTimerRef.current);
-          safetyEndTimerRef.current = null;
-        }
-        console.log("[playback] ended (didJustFinish)");
-        onEndRef.current?.();
-      }
-    });
-    return () => {
-      sub.remove();
-      if (safetyEndTimerRef.current) {
-        clearTimeout(safetyEndTimerRef.current);
-      }
-    };
-  }, [player]);
-
-  // Per-URI effect: queue + play each new turn's WAV.
   useEffect(() => {
     if (!uri || uri === lastPlayedUriRef.current) return;
     lastPlayedUriRef.current = uri;
 
     const label = uri.split("/").pop() ?? uri;
+    let endTimer: NodeJS.Timeout | null = null;
+    let alreadyStarted = false;
+    let alreadyEnded = false;
 
-    // Subscribe FIRST, then replace — otherwise we might miss the
-    // load-completed event if native is faster than React's effect chain.
+    const fireStart = () => {
+      if (alreadyStarted) return;
+      alreadyStarted = true;
+      console.log(`[playback] start (${label})`);
+      onStartRef.current?.();
+    };
+    const fireEnd = () => {
+      if (alreadyEnded) return;
+      alreadyEnded = true;
+      console.log(`[playback] end (${label})`);
+      onEndRef.current?.();
+    };
+
+    // Listen for the load event to get the actual duration, then play
+    // and schedule the end fire.
     const sub = player.addListener("playbackStatusUpdate", (status) => {
-      if (status.isLoaded) {
-        try {
-          player.play();
-          console.log(`[playback] loaded → playing: ${label}`);
-        } catch (err) {
-          console.warn("[playback] play() threw after load", err);
-        }
-        sub.remove(); // one-shot per URI
+      if (!status.isLoaded) return;
+      try {
+        // Re-enforce speakerphone before each playback (Day 5-F).
+        InCallManager.setForceSpeakerphoneOn(true);
+        InCallManager.setSpeakerphoneOn(true);
+        player.volume = 1.0;
+
+        player.play();
+        fireStart();
+
+        const durationMs = Math.max(500, status.duration * 1000);
+        // +200ms covers the gap between play() returning and the speaker
+        // actually emitting the first sample. Empirical, generous.
+        endTimer = setTimeout(fireEnd, durationMs + 200);
+        console.log(
+          `[playback] loaded → playing ${label} (${(durationMs / 1000).toFixed(2)}s)`,
+        );
+      } catch (err) {
+        console.warn("[playback] play() threw", err);
+        // If play() throws, still release the gate so the mic isn't stuck.
+        fireStart();
+        fireEnd();
       }
+      sub.remove(); // one-shot
     });
 
-    // Safety timeout: if `isLoaded` never fires within 1s (file missing,
-    // codec issue, race condition), try playing anyway. Worse case it
-    // silently no-ops again; we don't make things worse.
-    const fallback = setTimeout(() => {
+    // Safety: if `isLoaded` doesn't fire within 1s, kick play() anyway
+    // and arbitrarily release the gate so the mic doesn't deadlock.
+    const loadTimeout = setTimeout(() => {
       sub.remove();
       try {
         player.play();
-        console.warn(
-          `[playback] no loaded event after 1s, playing anyway: ${label}`,
-        );
-      } catch (err) {
-        console.warn("[playback] fallback play() threw", err);
+      } catch {
+        /* ignore */
       }
+      console.warn(`[playback] no isLoaded after 1s for ${label}`);
+      fireStart();
+      // Without a duration estimate we just wait 5s before re-engaging
+      // mic. Belt-and-braces.
+      endTimer = setTimeout(fireEnd, 5000);
     }, 1000);
 
-    // Clear fallback if loaded event fires first.
-    const subClear = player.addListener("playbackStatusUpdate", (status) => {
-      if (status.isLoaded) {
-        clearTimeout(fallback);
-        subClear.remove();
-      }
-    });
-
     try {
-      // Re-enforce speakerphone before EACH playback. Empirically
-      // observed (Day 5-F testing) that audio played fine on the first
-      // turn but went silent on subsequent turns — strong signal that
-      // something (expo-audio's player init, an iOS route-change
-      // notification, or a session interruption from the recording side)
-      // is resetting the output port. Calling setForceSpeakerphoneOn on
-      // every turn is cheap and idempotent.
-      InCallManager.setForceSpeakerphoneOn(true);
-      InCallManager.setSpeakerphoneOn(true);
-
       player.replace({ uri });
-      // Defensive: ensure the player isn't muted/at zero volume.
-      player.volume = 1.0;
       console.log(`[playback] replace queued: ${label}`);
     } catch (err) {
       console.warn("[playback] replace failed", err);
-      sub.remove();
-      subClear.remove();
-      clearTimeout(fallback);
+      clearTimeout(loadTimeout);
+      fireStart();
+      fireEnd();
     }
 
     return () => {
       sub.remove();
-      subClear.remove();
-      clearTimeout(fallback);
+      clearTimeout(loadTimeout);
+      if (endTimer) clearTimeout(endTimer);
+      // If we're cleaning up before end fires (component unmount or
+      // URI change), still release the gate so the next turn isn't
+      // stuck waiting.
+      if (alreadyStarted && !alreadyEnded) {
+        fireEnd();
+      }
     };
   }, [uri, player]);
 
