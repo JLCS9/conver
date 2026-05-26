@@ -2,21 +2,23 @@
 //
 // expo-audio (SDK 56+) exposes a real streaming PCM API via its `AudioStream`
 // class + `useAudioStream` hook — `int16` encoding + onBuffer(ArrayBuffer)
-// callback. That's exactly the shape Gemini Live wants for input.
+// callback. That's exactly the shape Deepgram STT wants for input.
 //
 // We deliberately do NOT call useAudioStream from useVoiceSession's top-level
-// hook. The Day-3 investigation showed that @siteed/audio-studio's
-// useAudioRecorder() installed an iOS recording-interruption listener at
-// mount time that broke NSURLSessionWebSocketTask. To stay safe, we render
-// the consumer (`MicCapture` component) ONLY after the WS is already open
-// — so any native side effect of useAudioStream is observed by the gateway
-// after the connection is established, not before.
+// hook. Activating the iOS AVAudioSession (which useAudioStream does on mount)
+// fires a route-change notification that RN's NSURLSessionWebSocketTask
+// treats as a fatal interruption. To stay safe, we render the consumer
+// (`MicCapture` component) ONLY after the WS is already open AND after a
+// short delay (see session.tsx) — so any native side effect of useAudioStream
+// is observed by the gateway after the connection is established and warmed.
 //
-// This file just centralizes the encoding constants + the base64 helper
-// since `Buffer` isn't on the global in RN 0.85's Hermes (was earlier).
+// This file centralises the encoding constants + the base64 helper.
 
-/** Gemini Live's expected input format: PCM 16-bit mono 16 kHz LE. */
-export const GEMINI_STREAM_OPTIONS = {
+/** PCM input format the gateway forwards verbatim to Deepgram Nova-3:
+ *  16-bit signed little-endian, mono, 16 kHz. Matches Deepgram's default
+ *  `linear16 / 16000Hz / 1ch` listen config and is what Gemini Live
+ *  expected too — kept the name "STT" because it's now provider-agnostic. */
+export const STT_PCM_16K_MONO_OPTIONS = {
   sampleRate: 16_000,
   channels: 1,
   encoding: "int16" as const,

@@ -17,7 +17,7 @@ import {
 } from "expo-audio";
 import { memo, useEffect, useMemo, useRef } from "react";
 import {
-  GEMINI_STREAM_OPTIONS,
+  STT_PCM_16K_MONO_OPTIONS,
   arrayBufferToBase64,
 } from "@/src/services/voice/audioCapture";
 import { activateInCallSpeakerphone } from "@/src/services/voice/audioSession";
@@ -61,7 +61,7 @@ function MicCaptureInner({ onChunk, paused = false }: MicCaptureProps) {
   // setMetrics tick from the parent would tear down and restart the mic.
   const streamOptions = useMemo(
     () => ({
-      ...GEMINI_STREAM_OPTIONS,
+      ...STT_PCM_16K_MONO_OPTIONS,
       onBuffer: (buffer: { data: ArrayBuffer; sampleRate: number; channels: number; timestamp: number }) => {
         if (pausedRef.current) {
           // Drop while coach is speaking. Log only the first dropped
@@ -82,9 +82,9 @@ function MicCaptureInner({ onChunk, paused = false }: MicCaptureProps) {
         chunkLogCounterRef.current += 1;
         const n = chunkLogCounterRef.current;
         // Log first chunk loudly (confirms pipe alive end-to-end), then
-        // every 50th (~5s at 100ms intervals) so we see the stream is
-        // alive without flooding Metro.
-        if (n === 1 || n % 50 === 0) {
+        // every 200th (~20s at 100ms intervals) so we see the stream is
+        // alive without flooding Metro on long sessions.
+        if (n === 1 || n % 200 === 0) {
           console.log(`[mic] chunk #${n} (${buffer.data.byteLength} bytes)`);
         }
       },

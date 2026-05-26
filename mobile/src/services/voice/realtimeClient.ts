@@ -1,19 +1,21 @@
-// WebSocket client that talks to our voice-gateway (NOT directly to Google).
+// WebSocket client that talks to our voice-gateway (NOT directly to any
+// upstream provider — the gateway orchestrates Deepgram + Gemini text +
+// ElevenLabs since Day 6).
 //
 // Protocol:
 //   - Open `wss://api.converflow.tech/voice?sessionId=<uuid>` with the
 //     Clerk JWT carried as `?token=<jwt>` (subprotocol header has shipped
 //     buggy on RN/iOS — see comment below).
-//   - Gateway authenticates, opens upstream to Gemini Live, sends the
-//     server-side setup. We don't have to send any setup ourselves — the
-//     gateway owns the system prompt + model config.
-//   - We send audio chunks as JSON: `{ realtime_input: { media_chunks: [
-//       { mime_type: 'audio/pcm', data: '<base64 PCM16 16kHz mono>' } ]}}`.
-//   - We receive Google's responses. CONFIRMED (Day 4 hex dump): Gemini's
-//     v1beta `BidiGenerateContent` endpoint sends **JSON encoded with the
-//     WebSocket BINARY opcode**, not protobuf and not text. So we decode
-//     UTF-8 + JSON.parse every inbound binary frame and dispatch typed
-//     `ServerMessage` events to the caller.
+//   - Gateway authenticates, sets up Deepgram STT + ElevenLabs TTS, and
+//     starts a Gemini-Flash-driven greeting. We don't have to send any
+//     setup ourselves — the gateway owns the system prompt + model config.
+//   - We send mic audio as JSON text frames: `{ realtime_input: {
+//       media_chunks: [{ mime_type: 'audio/pcm;rate=16000',
+//                         data: '<base64 PCM16 16kHz mono>' }] }}`.
+//   - We receive the gateway's server messages as WebSocket BINARY frames
+//     carrying UTF-8 JSON (the encoding was inherited from the original
+//     Gemini Live integration and kept for backwards compatibility).
+//     Decode bytes → JSON → typed ServerMessage events.
 //
 // State machine:
 //   idle → connecting → open → closing → closed
@@ -28,9 +30,10 @@ export type RealtimeStatus =
   | "errored";
 
 /**
- * Gemini Live BidiGenerateContent server-message shape (subset we care about).
- * Spec lives at https://ai.google.dev/api/live but the protobuf field names
- * arrive as camelCase JSON over the wire.
+ * Gateway server-message shape — preserved from the original Gemini Live
+ * Bidi spec so mobile stayed unchanged when we swapped the upstream stack.
+ * Field names match `https://ai.google.dev/api/live`; the gateway emits
+ * the same shape from any provider.
  */
 export interface GeminiInlineData {
   /** e.g. "audio/pcm;rate=24000" for model audio output. */
@@ -227,11 +230,12 @@ export class RealtimeClient {
           this.opts.onText?.(data);
         } else if (data instanceof ArrayBuffer) {
           this.binaryFrameCounter += 1;
-          // Dump the first 3 binary frames so we can identify the wire
-          // format if Google ever changes the encoding. Kept as a
-          // canary; cheap (<= 3 calls per session).
-          if (this.binaryFrameCounter <= 3) {
-            debugDumpBinary(`bin frame #${this.binaryFrameCounter}`, data);
+          // Dump only the first frame per session — enough to confirm
+          // the wire format (JSON-as-binary from the gateway) is still
+          // what we expect after a redeploy. Anything more pollutes
+          // Metro logs with hex dumps once audio starts flowing.
+          if (this.binaryFrameCounter === 1) {
+            debugDumpBinary(`bin frame #1`, data);
           }
           this.opts.onBinary?.(data);
           this.tryDispatchServerMessage(data);
@@ -244,8 +248,8 @@ export class RealtimeClient {
             .arrayBuffer()
             .then((buf) => {
               this.binaryFrameCounter += 1;
-              if (this.binaryFrameCounter <= 3) {
-                debugDumpBinary(`bin frame #${this.binaryFrameCounter} (blob)`, buf);
+              if (this.binaryFrameCounter === 1) {
+                debugDumpBinary(`bin frame #1 (blob)`, buf);
               }
               this.opts.onBinary?.(buf);
               this.tryDispatchServerMessage(buf);

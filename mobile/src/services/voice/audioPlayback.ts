@@ -1,24 +1,23 @@
-// Helpers for assembling Gemini Live's PCM audio responses into something
-// expo-audio's AudioPlayer can play.
+// Helpers for assembling the gateway's per-turn PCM audio into a WAV
+// that expo-audio's AudioPlayer can play.
 //
-// Wire format: Gemini sends `serverContent.modelTurn.parts[].inlineData`
-// where `data` is base64-encoded raw PCM 24 kHz int16 LE mono. Multiple
-// inlineData parts can arrive within a single turn, fragmented into ~20ms
-// chunks (~960 bytes each). We accumulate them into one buffer per turn,
-// wrap with a minimal WAV header, write to the cache directory, and hand
-// the file URI back so a player component can `.replace()` + `.play()`.
+// Wire format (preserved from the original Gemini Live integration):
+// the gateway sends `serverContent.modelTurn.parts[].inlineData.data` as
+// base64-encoded raw PCM 24 kHz int16 LE mono. Multiple inlineData parts
+// arrive within a single turn; we accumulate them into one buffer per
+// turn, wrap with a minimal WAV header, write to the cache directory,
+// and hand the file URI back so AudioPlayback can `.replace()` + `.play()`.
 //
 // Why per-turn instead of streaming: expo-audio's AudioPlayer takes a
-// finite source (URI or local require). True streaming would need
-// either a custom Expo module or `react-native-audio-api`'s
-// AudioContext.decodeAudioData + an AudioBufferSourceNode. Per-turn
-// buffering adds latency = turn length, which is fine for an English
-// conversation tutor (turns are 1-3 sentences ≈ 3-8s). Day-5 polish if
-// we need lower latency.
+// finite source (URI or local require). True streaming would need a
+// custom Expo module or react-native-audio-api's AudioBufferSourceNode.
+// Per-turn buffering adds latency = turn length, fine for tutoring
+// (turns ≈ 1-3 sentences ≈ 3-6s). Polish target if we want true
+// real-time streaming.
 
 import { File, Paths } from "expo-file-system";
 
-/** PCM format we agreed with Gemini's setup. */
+/** PCM format the gateway streams (ElevenLabs output_format=pcm_24000). */
 const PCM_SAMPLE_RATE = 24_000;
 const PCM_CHANNELS = 1;
 const PCM_BITS_PER_SAMPLE = 16;
@@ -108,13 +107,14 @@ export function writeTurnWavToCache(wav: Uint8Array, label: string): string {
   return file.uri;
 }
 
-/** True if a transcript delta is plausibly intended English text. We use
- *  this to suppress STT hallucinations: on a simulator with no real mic,
- *  Gemini's STT regularly outputs Thai/Arabic/CJK fragments because the
- *  background noise happens to phonemically resemble those scripts more
- *  than English. Rather than poison the on-screen transcript, we drop
- *  anything that contains characters from common non-Latin scripts. On
- *  a real device with real English speech, this passes through cleanly. */
+/** True if a transcript delta is plausibly intended English text.
+ *
+ *  Defence-in-depth guard against STT junk. With Deepgram (Day 6) most
+ *  STT hallucinations are now Latin-script gibberish (which still gets
+ *  passed through) rather than the Khmer/Thai/Arabic fragments Gemini
+ *  Live used to leak. The `<noise>` marker filter and non-Latin guards
+ *  below are now mostly inert — kept as cheap insurance against
+ *  pathological upstream outputs without slowing down the happy path. */
 export function isLikelyMeaningfulEnglish(s: string): boolean {
   const trimmed = s.trim();
   if (!trimmed) return false;
