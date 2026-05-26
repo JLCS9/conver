@@ -7,6 +7,7 @@
 // to-end. The orb / live transcript / proper styling lands in Week 4.
 
 import { useRouter } from "expo-router";
+import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -25,6 +26,28 @@ export default function SessionScreen() {
   const { phase, error, metadata, metrics, transcripts, playbackUri, start, stop, sendChunk } = useVoiceSession();
 
   const isLive = phase === "live";
+
+  // Day 5-I++: delay mounting the audio components by 600ms after the WS
+  // goes live. Reason: instantiating useAudioStream / useAudioPlayer
+  // synchronously fires an iOS audio session activation that React
+  // Native's WebSocket layer treats as a fatal interruption — WS closes
+  // with code 1005 before the gateway has time to send setupComplete.
+  //
+  // 600ms is empirically chosen: the gateway typically sends setupComplete
+  // in 50-200ms after `[ws] open`. Waiting 600ms gives a comfortable margin
+  // for the WS to receive that frame and warm up before any audio session
+  // activity fires. Once the WS has roundtripped at least one frame it
+  // survives subsequent route changes (iOS treats it as an established
+  // connection rather than a brand-new one to abort defensively).
+  const [audioReady, setAudioReady] = useState(false);
+  useEffect(() => {
+    if (!isLive) {
+      setAudioReady(false);
+      return;
+    }
+    const t = setTimeout(() => setAudioReady(true), 600);
+    return () => clearTimeout(t);
+  }, [isLive]);
   const isBusy = phase === "starting" || phase === "stopping";
   const canTrigger = phase === "idle" || phase === "ended" || phase === "error" || isLive;
 
@@ -140,7 +163,7 @@ export default function SessionScreen() {
           native audio hooks out of the React tree until the WS handshake
           has already succeeded. AudioPlayback uses the latest playbackUri
           state from useVoiceSession; each new URI triggers playback. */}
-      {isLive ? (
+      {isLive && audioReady ? (
         <>
           <MicCapture onChunk={sendChunk} />
           <AudioPlayback uri={playbackUri} />
