@@ -39,10 +39,11 @@ import { openDeepgramStt, type DeepgramSttClient } from "./deepgram.js";
 import { openElevenLabsTts } from "./elevenlabs.js";
 import { streamLLMResponse, SYSTEM_INSTRUCTION, type ChatMessage } from "./llm.js";
 
-/** Log only the first chunk and every Nth thereafter to keep info-level
- *  output bounded on long sessions. */
+/** Log only the first chunk and every 50 thereafter — a status line
+ *  every ~5s at 100ms chunks, enough to see flow direction during a
+ *  debug window without spamming long sessions. */
 function shouldLogAudioChunk(n: number): boolean {
-  return n === 1 || n % 200 === 0;
+  return n === 1 || n % 50 === 0;
 }
 
 const SESSION_START_TOKEN = "__SESSION_START__";

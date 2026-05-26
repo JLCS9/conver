@@ -81,10 +81,12 @@ function MicCaptureInner({ onChunk, paused = false }: MicCaptureProps) {
         onChunkRef.current(base64, buffer.data.byteLength);
         chunkLogCounterRef.current += 1;
         const n = chunkLogCounterRef.current;
-        // Log first chunk loudly (confirms pipe alive end-to-end), then
-        // every 200th (~20s at 100ms intervals) so we see the stream is
-        // alive without flooding Metro on long sessions.
-        if (n === 1 || n % 200 === 0) {
+        // Log first chunk loudly + every 50 thereafter. The cleanup
+        // bumped this to every 200 but that hides whether chunks are
+        // flowing during a 5-10s test window. Keeping a chunk per ~5s
+        // (50 chunks × 100ms) gives enough visibility during debug
+        // sessions without spamming hour-long ones.
+        if (n === 1 || n % 50 === 0) {
           console.log(`[mic] chunk #${n} (${buffer.data.byteLength} bytes)`);
         }
       },
