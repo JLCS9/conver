@@ -68,17 +68,27 @@ export class Conversation {
       {
         onPartial: (text) => {
           if (text) {
-            this.sendJson({
-              serverContent: { inputTranscription: { text } },
-            });
+            // Dedupe: Deepgram fires many partials per utterance as the
+            // STT refines its guess ("Hi", "Hi.", "Hi. Hi.", ...). The
+            // same text often repeats verbatim between partial + final.
+            // Emit only when the surface text changes.
+            if (text !== this.lastEmittedTranscript) {
+              this.lastEmittedTranscript = text;
+              this.sendJson({
+                serverContent: { inputTranscription: { text } },
+              });
+            }
           }
           // Empty `onPartial` (from SpeechStarted) is our barge-in signal.
           if (!text) this.handleBargeIn();
         },
         onFinal: (text) => {
-          this.sendJson({
-            serverContent: { inputTranscription: { text } },
-          });
+          if (text !== this.lastEmittedTranscript) {
+            this.lastEmittedTranscript = text;
+            this.sendJson({
+              serverContent: { inputTranscription: { text } },
+            });
+          }
           // Buffer for the next utterance_end trigger. Deepgram fires
           // multiple `onFinal` events as it stabilises sub-utterances
           // (e.g. "Hi" then "Hi how are you"), so we concatenate with
@@ -152,10 +162,19 @@ export class Conversation {
 
   // ─── internals ────────────────────────────────────────────────────────
 
+  /**
+   * Send a server message to the mobile client. Encodes JSON-as-binary
+   * to match what Gemini Live used to emit, because the mobile's
+   * `RealtimeClient` only dispatches `tryDispatchServerMessage` from
+   * BINARY frames (`onBinary`). Text frames go to `onText` which only
+   * logs — no transcript / audio / metrics handling fires. Sending as
+   * Buffer keeps the wire-compatible behaviour the mobile expects.
+   */
   private sendJson(obj: object): void {
     if (this.closed || this.clientWs.readyState !== WebSocket.OPEN) return;
     try {
-      this.clientWs.send(JSON.stringify(obj));
+      const payload = Buffer.from(JSON.stringify(obj), "utf-8");
+      this.clientWs.send(payload, { binary: true });
     } catch (err) {
       this.log.warn({ err }, "send to client failed (likely closing)");
     }
@@ -214,18 +233,27 @@ export class Conversation {
    * turn). Trigger an LLM + TTS round.
    */
   private handleUtteranceEnd(): void {
-    // Pull the latest user transcript from the history. Deepgram already
-    // pushed it via onFinal → we sent it to client too, but we kept no
-    // local copy. Use the last `inputTranscription` we forwarded.
-    // Simpler: buffer the final transcripts as they arrive.
     const userText = this.bufferedUserText.trim();
     this.bufferedUserText = "";
+    // Reset the dedupe guard so the next utterance's "Hi" doesn't get
+    // suppressed because the previous one ended with "Hi" too.
+    this.lastEmittedTranscript = "";
     if (!userText) return;
     void this.runLLMTurn(userText);
   }
 
   /** Accumulator for Deepgram finals between utterance_end events. */
   private bufferedUserText = "";
+
+  /** Last transcript text we emitted to the client (dedupe guard).
+   *  Deepgram repeats the same surface text across partial → final and
+   *  even across consecutive finals; we only emit when it changes. */
+  private lastEmittedTranscript = "";
+
+  /** How many previous turns to keep in the LLM context. Older history
+   *  is dropped to bound per-call token cost (each turn re-bills history).
+   *  10 turns ≈ 20 messages ≈ 1-2 KB of context, plenty for casual chat. */
+  private readonly HISTORY_TURN_CAP = 10;
 
   /**
    * Run one LLM turn. Streams Gemini's text → ElevenLabs WS → audio
@@ -334,6 +362,15 @@ export class Conversation {
 
     if (fullReply.trim()) {
       this.history.push({ role: "model", text: fullReply.trim() });
+    }
+    // Bound history to keep token cost flat over long sessions. Each
+    // LLM call re-bills the whole context, so unbounded growth is a
+    // quadratic cost curve in token spend. Drop the oldest turns once
+    // we exceed the cap — keep the most recent context which is what
+    // the model needs most for coherence.
+    if (this.history.length > this.HISTORY_TURN_CAP * 2) {
+      const drop = this.history.length - this.HISTORY_TURN_CAP * 2;
+      this.history.splice(0, drop);
     }
     this.inflightAbort = null;
     // inflightTts is closed by onComplete handler above.
