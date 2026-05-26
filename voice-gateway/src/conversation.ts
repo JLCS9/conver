@@ -287,6 +287,22 @@ export class Conversation {
     this.inflightAbort = abort;
     const turnLog = this.log.child({ turn: this.history.length + 1 });
 
+    // Belt-and-braces safety: regardless of what happens (LLM stall,
+    // TTS hang, lost callback, network drop) the mic must come back
+    // online within 30 seconds. Without this, a single missed
+    // onComplete leaves the user permanently muted while the UI shows
+    // the session as healthy — exactly the "app aparece bien pero no
+    // procesa" symptom we hit. The setTimeouts in the success path
+    // fire well before 30s, so this only kicks in on real anomalies.
+    const safetyTimer = setTimeout(() => {
+      if (this.modelHasStartedSpeaking) {
+        turnLog.warn(
+          "30s safety timeout — force-releasing mic gate",
+        );
+        this.modelHasStartedSpeaking = false;
+      }
+    }, 30_000);
+
     // Push the user message into history NOW so it's there even if the
     // turn aborts. Empty-string user text (session start) is skipped.
     if (userText && userText !== "__SESSION_START__") {
@@ -369,6 +385,11 @@ export class Conversation {
           turnLog.error({ err }, "tts error mid-turn");
           this.sendJson({ serverContent: { interrupted: true } });
           tts.close();
+          // CRITICAL: reset the mic gate. Without this, a TTS error
+          // leaves modelHasStartedSpeaking=true forever and the mic
+          // is gated for the rest of the session — app appears alive
+          // but never processes another word from the user.
+          this.modelHasStartedSpeaking = false;
         },
       },
       turnLog.child({ component: "elevenlabs" }),
@@ -406,6 +427,9 @@ export class Conversation {
       tts.close();
       this.inflightAbort = null;
       this.inflightTts = null;
+      // Defensive: ensure the mic gate is released so the user isn't
+      // stuck if LLM failed mid-turn.
+      this.modelHasStartedSpeaking = false;
       return;
     }
 
