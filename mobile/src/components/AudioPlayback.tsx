@@ -137,7 +137,7 @@ function AudioPlaybackInner({
 
     return () => {
       sub.remove();
-      clearTimeout(loadTimeout);
+      if (loadTimeout) clearTimeout(loadTimeout);
       if (endTimer) clearTimeout(endTimer);
       // If we're cleaning up before end fires (component unmount or
       // URI change), still release the gate so the next turn isn't
