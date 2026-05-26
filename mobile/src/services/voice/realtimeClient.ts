@@ -274,12 +274,22 @@ export class RealtimeClient {
   /**
    * Send a PCM 16 kHz mono chunk to Gemini. Caller provides the chunk as a
    * base64-encoded string (the same format @siteed/expo-audio-stream emits).
+   *
+   * `mime_type` MUST include the `;rate=16000` parameter. Without it
+   * Gemini Live v1beta defaults to 24 kHz (its native model rate), which
+   * means our 16 kHz samples get reinterpreted 1.5× too fast at upstream
+   * STT → audio sounds pitch-shifted/garbled → STT transcribes English
+   * speech as random non-English fragments (Arabic, Dutch, Thai...).
+   * That's the root cause of the "user transcripts in random languages"
+   * symptom observed Day 5-C. Fix: always include the rate hint.
    */
   sendAudioChunk(base64Pcm: string): void {
     if (!this.ws || this.status !== "open") return;
     const message = {
       realtime_input: {
-        media_chunks: [{ mime_type: "audio/pcm", data: base64Pcm }],
+        media_chunks: [
+          { mime_type: "audio/pcm;rate=16000", data: base64Pcm },
+        ],
       },
     };
     this.ws.send(JSON.stringify(message));

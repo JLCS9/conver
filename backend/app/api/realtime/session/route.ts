@@ -67,24 +67,20 @@ export async function POST(request: Request) {
   const supabase = supabaseAdmin();
 
   // Resolve the internal user id — sessions.user_id references public.users.
+  // No onboarding gate: Day 5-B made onboarding optional. The mobile Home
+  // screen calls /api/me which upserts the row, so by the time the user
+  // hits /api/realtime/session, public.users has a row for them. If it
+  // doesn't (e.g. /api/me failed earlier), the .single() lookup below
+  // 404s and the client surfaces it.
   const { data: user, error: userErr } = await supabase
     .from("users")
-    .select("id, onboarding_completed_at")
+    .select("id")
     .eq("clerk_user_id", userId)
     .single();
 
   if (userErr || !user) {
     console.error("[/api/realtime/session] user lookup failed", userErr);
     return Response.json({ error: "user_not_found" }, { status: 404 });
-  }
-
-  if (!user.onboarding_completed_at) {
-    // Better UX to refuse a voice session before onboarding than to let
-    // them in and have them hit confusing errors mid-conversation.
-    return Response.json(
-      { error: "onboarding_incomplete" },
-      { status: 409 },
-    );
   }
 
   // Sum today's session durations. We could read voice_usage_logs.minutes_used

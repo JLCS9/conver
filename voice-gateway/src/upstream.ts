@@ -145,8 +145,16 @@ export function openUpstream(
           },
           // Ask the upstream to also send the user's transcribed audio
           // back as text — the client renders this live above the orb.
-          input_audio_transcription: {},
-          output_audio_transcription: {},
+          //
+          // Day 5-F: previously these were empty `{}`. Gemini Live's STT
+          // would then run auto-language-detection on each input chunk
+          // and on Spanish-accented English happily mislabeled phonemes
+          // as Arabic / Dutch / Thai. Pinning `language_code: "en-US"`
+          // here removes the per-chunk LID and forces the STT pipeline
+          // to interpret all input as English. speech_config.language_code
+          // already pins it for TTS output; this pins it for STT input.
+          input_audio_transcription: { language_code: "en-US" },
+          output_audio_transcription: { language_code: "en-US" },
         },
       };
       try {
