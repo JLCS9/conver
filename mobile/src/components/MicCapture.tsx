@@ -59,17 +59,16 @@ function MicCaptureInner({ onChunk, paused = false }: MicCaptureProps) {
     pausedRef.current = paused;
   }, [paused]);
 
-  // Day 6-V: kick the stream back on when leaving the paused state.
-  // Empirically (confirmed by the absence of any [mic] chunk #N log
-  // after [mic] unpaused), iOS's AVAudioPlayer silently interrupts
-  // useAudioStream's input recording when playback starts. The native
-  // input never resumes on its own when playback ends — our pausedRef
-  // flips false but the onBuffer callback simply never fires again.
+  // Day 6-V: revive the native input stream after every transition out
+  // of paused. iOS's AVAudioPlayer silently interrupts useAudioStream's
+  // input recording when playback starts, and the input never resumes
+  // on its own when playback ends. Our pausedRef flips false but the
+  // onBuffer callback simply never fires again.
   //
-  // Fix: when paused goes true → false, check stream.isStreaming. If
-  // it's false, call stream.start() to revive the native recording.
-  // Calling start() on an already-streaming stream is a no-op (safe).
-  const prevPausedRef = useRef(paused);
+  // Strategy: every time paused becomes false (or on initial mount),
+  // log the stream state and unconditionally call stream.start() after
+  // a short settle. start() on an already-streaming stream is a safe
+  // no-op, so we don't risk over-restarting.
 
   // Counter for log-throttling — chunks arrive every ~10-50 ms, we don't
   // want to spam Metro with thousands of log lines.
@@ -116,28 +115,27 @@ function MicCaptureInner({ onChunk, paused = false }: MicCaptureProps) {
 
   const { stream } = useAudioStream(streamOptions);
 
-  // Day 6-V: revive the native input stream when leaving paused.
-  // Runs on every paused-prop change; only acts on true → false.
+  // Day 6-V: revive the native input stream after every unpause.
+  // Logs at every step so we can confirm the effect fires and act on it.
   useEffect(() => {
-    const wasPaused = prevPausedRef.current;
-    prevPausedRef.current = paused;
-    if (paused || !wasPaused) return; // only act on the unpaused edge
-
-    // Give iOS a beat to settle its audio session post-playback before
-    // we ask for the input back. Empirical 200ms — too short and the
-    // start() races AVAudioPlayer's tear-down; too long and the user
-    // notices a gap.
+    console.log(`[mic] effect: paused=${paused}`);
+    if (paused) return;
+    // We're entering or staying-in unpaused state. Even on initial
+    // mount we want to confirm the stream is alive; later transitions
+    // (true → false) are when iOS likely just killed input recording.
     const t = setTimeout(() => {
-      if (!stream) return;
-      if (stream.isStreaming) {
-        console.log("[mic] stream still streaming after unpause — no kick needed");
+      if (!stream) {
+        console.log("[mic] no stream object yet, skipping kick");
         return;
       }
-      console.log("[mic] stream silently paused by iOS — kicking start()");
+      console.log(`[mic] stream check: isStreaming=${stream.isStreaming}`);
+      // Restart unconditionally. start() on a streaming stream is a
+      // no-op per expo-audio docs; calling it always means we never
+      // miss the case where isStreaming reports stale.
       stream
         .start()
-        .then(() => console.log("[mic] kick succeeded"))
-        .catch((err) => console.warn("[mic] kick failed", err));
+        .then(() => console.log("[mic] start() returned"))
+        .catch((err) => console.warn("[mic] start() failed", err));
     }, 200);
     return () => clearTimeout(t);
   }, [paused, stream]);
