@@ -319,7 +319,27 @@ export function useVoiceSession(): UseVoiceSessionResult {
     clientRef.current = null;
     try { await releaseAudioSession(); } catch { /* ignore */ }
     setPhase("ended");
-  }, [phase]);
+
+    // Day 7-C: kick off the post-session analyser. Fire-and-forget so
+    // we don't make the user wait on the UI thread for the extraction
+    // to complete. If it fails, no user-facing impact — the vocabulary
+    // / corrections / context just don't update for this session. The
+    // next session still benefits from prior sessions' analyses.
+    const sessionIdForAnalysis = metadata?.sessionId;
+    if (sessionIdForAnalysis) {
+      void (async () => {
+        try {
+          const res = await api<{ ok: boolean; turnsAnalyzed: number; vocabularyAdded: number; correctionsAdded: number }>(
+            `/api/sessions/${sessionIdForAnalysis}/analyze`,
+            { method: "POST", getToken, timeoutMs: 30_000 },
+          );
+          console.log("[voice] post-session analysis ok", res);
+        } catch (err) {
+          console.warn("[voice] post-session analysis failed (non-fatal)", err);
+        }
+      })();
+    }
+  }, [phase, metadata?.sessionId, getToken]);
 
   useEffect(() => {
     return () => {
