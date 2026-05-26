@@ -370,9 +370,22 @@ export class Conversation {
             0,
             audioDurationMs - elapsedSinceFirstChunkMs,
           );
-          // +400ms safety margin: covers network jitter + client-side
-          // playback buffer + speaker tail.
-          const reEngageInMs = remainingPlaybackMs + 400;
+          // Safety margin needs to cover:
+          //   - Network jitter to client (~50-150ms)
+          //   - Client-side latency from receiving WAV to calling
+          //     player.play() (load, decode, isLoaded event → 200-400ms
+          //     in our expo-audio setup)
+          //   - The full audio duration of client-side playback (the
+          //     player starts AFTER turnComplete on the client, so
+          //     playback effectively shifts forward by all of the above)
+          //   - Speaker tail / room reverb (~200-300ms)
+          //
+          // 400ms was too tight: Day 6-I logs showed coach voice
+          // ('Going so far. Yes.') still being captured after the gate
+          // lifted. 1500ms gives comfortable headroom at the cost of
+          // a ~1s pause after the coach finishes before the user can
+          // be heard. Acceptable for the demo's natural turn-taking.
+          const reEngageInMs = remainingPlaybackMs + 1500;
           turnLog.info(
             { reEngageInMs, audioDurationMs },
             "scheduling mic re-engage after playback",
