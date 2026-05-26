@@ -32,13 +32,6 @@ export default function SessionScreen() {
   // synchronously fires an iOS audio session activation that React
   // Native's WebSocket layer treats as a fatal interruption — WS closes
   // with code 1005 before the gateway has time to send setupComplete.
-  //
-  // 600ms is empirically chosen: the gateway typically sends setupComplete
-  // in 50-200ms after `[ws] open`. Waiting 600ms gives a comfortable margin
-  // for the WS to receive that frame and warm up before any audio session
-  // activity fires. Once the WS has roundtripped at least one frame it
-  // survives subsequent route changes (iOS treats it as an established
-  // connection rather than a brand-new one to abort defensively).
   const [audioReady, setAudioReady] = useState(false);
   useEffect(() => {
     if (!isLive) {
@@ -52,6 +45,15 @@ export default function SessionScreen() {
     }, 600);
     return () => clearTimeout(t);
   }, [isLive]);
+
+  // Day 6-L: client-side half-duplex gate. AudioPlayback fires the
+  // callbacks below when the coach's TTS actually starts and ends
+  // playing (real expo-audio events, not server-side timer estimation).
+  // While `coachIsSpeaking` is true, MicCapture drops chunks at the
+  // source — kills the speaker → mic echo loop without losing any of
+  // the user's words once playback ends (the unmute is event-driven,
+  // no extra padding seconds).
+  const [coachIsSpeaking, setCoachIsSpeaking] = useState(false);
   const isBusy = phase === "starting" || phase === "stopping";
   const canTrigger = phase === "idle" || phase === "ended" || phase === "error" || isLive;
 
@@ -169,8 +171,12 @@ export default function SessionScreen() {
           state from useVoiceSession; each new URI triggers playback. */}
       {isLive && audioReady ? (
         <>
-          <MicCapture onChunk={sendChunk} />
-          <AudioPlayback uri={playbackUri} />
+          <MicCapture onChunk={sendChunk} paused={coachIsSpeaking} />
+          <AudioPlayback
+            uri={playbackUri}
+            onPlaybackStart={() => setCoachIsSpeaking(true)}
+            onPlaybackEnd={() => setCoachIsSpeaking(false)}
+          />
         </>
       ) : null}
     </SafeAreaView>

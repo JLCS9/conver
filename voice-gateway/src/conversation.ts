@@ -135,22 +135,14 @@ export class Conversation {
     const chunks = msg.realtime_input?.media_chunks;
     if (!chunks || chunks.length === 0) return;
 
-    // Half-duplex gate. If the coach's TTS is actively playing, don't
-    // forward mic audio to Deepgram — the iPhone's speaker output is
-    // loud enough that the mic re-captures it and Deepgram cheerfully
-    // transcribes the coach's words as if the user said them ("Hi
-    // there. It's great to connect" appearing in the user transcript
-    // while the coach is saying exactly that line). iOS's native AEC
-    // in voiceChat mode is not aggressive enough for handsfree-speaker
-    // distance + iPhone built-in mic.
-    //
-    // Trade-off: this also disables barge-in (the user can't interrupt
-    // the coach mid-sentence). Acceptable for the demo. To recover
-    // barge-in we'd need either a proper AEC (Krisp, Pipecat) or a
-    // client-side VAD that distinguishes user voice from speaker echo.
-    if (this.modelHasStartedSpeaking) {
-      return;
-    }
+    // Day 6-L: Removed the server-side half-duplex gate. Estimating
+    // when the client finishes playing TTS from server-side bytes +
+    // timers was unreliable (off by hundreds of ms either way: too
+    // tight → coach voice leaks into user transcript; too loose →
+    // user's voice is silently dropped for seconds). Gating now lives
+    // on the mobile (AudioPlayback fires onPlaybackStart/onPlaybackEnd
+    // events, MicCapture drops onChunk calls while paused). The
+    // gateway just forwards every chunk it receives to Deepgram.
 
     for (const c of chunks) {
       const pcm = Buffer.from(c.data, "base64");

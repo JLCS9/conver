@@ -25,9 +25,14 @@ import { activateInCallSpeakerphone } from "@/src/services/voice/audioSession";
 interface MicCaptureProps {
   /** Called for each PCM chunk produced by the mic. Already base64-encoded. */
   onChunk: (base64: string, byteLength: number) => void;
+  /** When true, captured chunks are NOT forwarded to onChunk. Used by
+   *  the parent to mute the upstream while the coach's TTS is playing
+   *  (kills the speaker → mic echo loop without touching the native
+   *  recording stream itself, which is more reliable than start/stop). */
+  paused?: boolean;
 }
 
-function MicCaptureInner({ onChunk }: MicCaptureProps) {
+function MicCaptureInner({ onChunk, paused = false }: MicCaptureProps) {
   // Store the callback in a ref so the onBuffer closure stays stable —
   // expo-audio's hook re-reads options object on every render otherwise,
   // and we don't want to thrash native bindings. Assignment lives inside
@@ -38,9 +43,18 @@ function MicCaptureInner({ onChunk }: MicCaptureProps) {
     onChunkRef.current = onChunk;
   }, [onChunk]);
 
+  // Same pattern for the pause flag — onBuffer reads `pausedRef.current`
+  // each tick, so we keep the native callback stable across React renders
+  // while still respecting whatever the parent's latest paused state is.
+  const pausedRef = useRef(paused);
+  useEffect(() => {
+    pausedRef.current = paused;
+  }, [paused]);
+
   // Counter for log-throttling — chunks arrive every ~10-50 ms, we don't
   // want to spam Metro with thousands of log lines.
   const chunkLogCounterRef = useRef(0);
+  const dropLogCounterRef = useRef(0);
 
   // Stable options reference so useAudioStream doesn't re-create the
   // native stream on every parent re-render. Without this, every
@@ -49,6 +63,20 @@ function MicCaptureInner({ onChunk }: MicCaptureProps) {
     () => ({
       ...GEMINI_STREAM_OPTIONS,
       onBuffer: (buffer: { data: ArrayBuffer; sampleRate: number; channels: number; timestamp: number }) => {
+        if (pausedRef.current) {
+          // Drop while coach is speaking. Log only the first dropped
+          // chunk per pause window so we can confirm gating is engaging
+          // without flooding the console.
+          dropLogCounterRef.current += 1;
+          if (dropLogCounterRef.current === 1) {
+            console.log("[mic] paused (coach speaking) — dropping chunks");
+          }
+          return;
+        }
+        if (dropLogCounterRef.current > 0) {
+          console.log(`[mic] unpaused — dropped ${dropLogCounterRef.current} chunks`);
+          dropLogCounterRef.current = 0;
+        }
         const base64 = arrayBufferToBase64(buffer.data);
         onChunkRef.current(base64, buffer.data.byteLength);
         chunkLogCounterRef.current += 1;
