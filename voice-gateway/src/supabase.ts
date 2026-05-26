@@ -26,6 +26,22 @@ export interface UserRow {
   clerk_user_id: string;
 }
 
+/** Progressive user profile, learned across sessions. All fields optional —
+ *  the post-session analyser fills them in as it discovers new facts.
+ *  Stored as a single JSONB column so we can evolve the shape without
+ *  schema migrations. Inject into the system prompt at session start. */
+export interface UserContext {
+  profession?: string;
+  interests?: string[];
+  speaking_level?: "beginner" | "intermediate" | "advanced";
+  last_topics?: string[];
+  focus_areas?: string[]; // e.g. ['past tense', 'phrasal verbs']
+}
+
+export interface UserWithContext extends UserRow {
+  user_context: UserContext;
+}
+
 /**
  * Resolves the internal user row for the given Clerk id, returning null
  * if the Clerk user has no Supabase mirror (means they never hit /api/me).
@@ -40,6 +56,82 @@ export async function findUserByClerkId(
     .single();
   if (error || !data) return null;
   return data;
+}
+
+/**
+ * Same as findUserByClerkId but also pulls user_context + the top N
+ * vocabulary words + the most recent grammar corrections. This is the
+ * single batch we hand to buildSystemPrompt at session start.
+ */
+export async function findUserWithMemory(
+  clerkUserId: string,
+  opts: { vocabLimit?: number; correctionsLimit?: number } = {},
+): Promise<{
+  user: UserWithContext;
+  topVocabulary: { word: string; count: number; level: string | null }[];
+  recentCorrections: { original_text: string; corrected_text: string; error_type: string }[];
+} | null> {
+  const vocabLimit = opts.vocabLimit ?? 50;
+  const correctionsLimit = opts.correctionsLimit ?? 10;
+
+  const { data: userData, error: userErr } = await client
+    .from("users")
+    .select("id, clerk_user_id, user_context")
+    .eq("clerk_user_id", clerkUserId)
+    .single();
+  if (userErr || !userData) return null;
+
+  // Fetch top vocabulary by count and recent grammar corrections in
+  // parallel. Both are best-effort: if either fails (e.g. brand-new
+  // user with empty tables) we still hand back the user with empty arrays.
+  const [vocabRes, correctionsRes] = await Promise.all([
+    client
+      .from("user_vocabulary")
+      .select("word, count, level")
+      .eq("user_id", userData.id)
+      .order("count", { ascending: false })
+      .limit(vocabLimit),
+    client
+      .from("user_grammar_corrections")
+      .select("original_text, corrected_text, error_type")
+      .eq("user_id", userData.id)
+      .order("created_at", { ascending: false })
+      .limit(correctionsLimit),
+  ]);
+
+  return {
+    user: {
+      id: userData.id,
+      clerk_user_id: userData.clerk_user_id,
+      user_context: (userData.user_context as UserContext) ?? {},
+    },
+    topVocabulary: vocabRes.data ?? [],
+    recentCorrections: correctionsRes.data ?? [],
+  };
+}
+
+/**
+ * Persist a single conversation turn. Fire-and-forget — we never block
+ * the live pipeline on a Supabase write. If it fails we log and move on;
+ * a few missing turns is preferable to a stuttering conversation.
+ */
+export async function insertTranscriptTurn(args: {
+  sessionId: string;
+  userId: string;
+  turnIndex: number;
+  role: "user" | "model";
+  text: string;
+}): Promise<void> {
+  const { error } = await client.from("conversation_transcripts").insert({
+    session_id: args.sessionId,
+    user_id: args.userId,
+    turn_index: args.turnIndex,
+    role: args.role,
+    text: args.text,
+  });
+  if (error) {
+    console.warn("[supabase] insertTranscriptTurn failed", error.message);
+  }
 }
 
 /**

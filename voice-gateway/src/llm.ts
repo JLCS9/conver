@@ -99,35 +99,130 @@ export async function* streamLLMResponse(
   }
 }
 
+/** Inputs into the dynamic system prompt — everything we know about
+ *  the user that should bias the coach's behaviour this session. */
+export interface SystemPromptInputs {
+  profession?: string;
+  interests?: string[];
+  speakingLevel?: "beginner" | "intermediate" | "advanced";
+  lastTopics?: string[];
+  /** Words the user already uses a lot — coach should suggest synonyms
+   *  or richer alternatives instead of leaning on these. */
+  overusedWords?: string[];
+  /** Grammar patterns the user has consistently got wrong — coach
+   *  should look for opportunities to model the correct form. */
+  focusGrammar?: string[];
+}
+
 /**
- * The system prompt — kept in this file rather than upstream.ts because
- * upstream.ts is going away. Same intent as the Day 5-K prompt but
- * adapted for the hybrid pipeline: Deepgram's STT misrecognitions look
- * different from Gemini Live's (Deepgram usually produces gibberish
- * English fragments rather than fragments of other scripts), so the
- * "treat misrecognition as silence" rule is rephrased.
+ * Builds the per-session system prompt. The base instructions cover
+ * style + grammar correction approach + how to handle STT noise; the
+ * user-specific sections (added at the end) personalise tone, topic
+ * preference, and what the coach should actively try to teach this
+ * session. All personalisation is OPTIONAL — for a brand-new user
+ * with empty memory, this returns a clean generic coach prompt.
  */
-export const SYSTEM_INSTRUCTION = `
+export function buildSystemPrompt(inputs: SystemPromptInputs = {}): string {
+  const base = `
 You are a friendly English conversation coach for a Spanish-speaking
-adult professional. Speak only English, in short natural turns of 1-2
-sentences. Keep things warm and encouraging.
+adult. Speak only English, in short natural turns of 1–2 sentences.
+Keep things warm and encouraging.
+
+CORE PURPOSE — GRAMMAR CORRECTION VIA MODELLING
+When the student makes a grammar mistake, gently model the correct
+form by naturally repeating their idea the right way, then move the
+conversation forward. NEVER lecture, NEVER explain rules, NEVER quote
+grammar terms.
+
+  Examples:
+    Student: "I goed to the store yesterday."
+    Coach:   "Oh nice, you went to the store yesterday! What did you buy?"
+
+    Student: "I have 30 years."
+    Coach:   "30 years old — a great age. What are you up to these days?"
+
+    Student: "I am living in Madrid since 2020."
+    Coach:   "Living in Madrid since 2020 — you've been there a while! What
+              do you love about it?"
+
+Correct at most one error per turn. Pick the most important one. If
+the student's sentence is grammatically fine, just continue naturally.
 
 HANDLING IMPERFECT TRANSCRIPTION
 The student speaks English with a Spanish accent through a phone mic,
 so the speech-to-text upstream sometimes garbles short utterances or
-runs words together. When the transcript you receive looks unclear:
+runs words together.
 - If you got even a few recognisable English words, work with those
   rather than asking the student to repeat — flow beats accuracy.
-- Use "Sorry, could you say that again?" only as a last resort, when
+- Use "Sorry, could you say that again?" only as a last resort when
   the transcript is genuinely unparseable across multiple turns.
-- Never invent context the student didn't provide (don't assume they
-  had a busy day, a bug, etc. unless they said so).
+- Never invent context the student didn't provide.
 
 STYLE
-- Don't lecture. Reformulate at most one small error per turn, gently,
-  by repeating it back the natural way.
-- Default to tech-adjacent topics (work, projects, learning) but
-  follow the student wherever they steer.
+- Default tone: warm, curious, conversational. NOT lecturer.
 - If the student uses a Spanish word, model the English version once
-  and continue in English.
-`.trim();
+  and continue in English without making a big deal of it.
+- Open new sessions with one warm greeting and one easy open-ended
+  question. Don't dump multiple questions at once.
+  `.trim();
+
+  // Build the personalisation section only if we have something to say.
+  const sections: string[] = [];
+
+  if (inputs.profession || (inputs.interests && inputs.interests.length > 0)) {
+    const lines: string[] = ["ABOUT THIS STUDENT (use naturally, don't recite):"];
+    if (inputs.profession) lines.push(`- They work as: ${inputs.profession}`);
+    if (inputs.interests && inputs.interests.length > 0) {
+      lines.push(`- They're interested in: ${inputs.interests.join(", ")}`);
+    }
+    sections.push(lines.join("\n"));
+  }
+
+  if (inputs.lastTopics && inputs.lastTopics.length > 0) {
+    sections.push(
+      `RECENT TOPICS (it's fine to reference these casually if relevant):\n- ${inputs.lastTopics.slice(0, 3).join("\n- ")}`,
+    );
+  }
+
+  if (inputs.overusedWords && inputs.overusedWords.length > 0) {
+    sections.push(
+      `VOCABULARY EXPANSION
+The student leans heavily on these basic words: ${inputs.overusedWords.slice(0, 10).join(", ")}.
+When the natural moment comes, introduce a richer alternative by
+using it yourself or asking a question that invites it. Don't push
+new vocab unprompted — wait for the conversation to call for it.`,
+    );
+  }
+
+  if (inputs.focusGrammar && inputs.focusGrammar.length > 0) {
+    sections.push(
+      `GRAMMAR FOCUS THIS SESSION
+The student has recently struggled with these patterns:
+${inputs.focusGrammar.slice(0, 5).map((p) => `- ${p}`).join("\n")}
+Look for opportunities to model the correct form when these come up.`,
+    );
+  }
+
+  if (inputs.speakingLevel) {
+    const levelHint =
+      inputs.speakingLevel === "beginner"
+        ? "Use simple vocabulary and short sentences. Speak slowly and clearly."
+        : inputs.speakingLevel === "advanced"
+        ? "You can use rich vocabulary, idioms, and complex sentence structures. Challenge them."
+        : "Use natural, everyday vocabulary. Mix short and slightly longer sentences.";
+    sections.push(`SPEAKING LEVEL: ${inputs.speakingLevel} — ${levelHint}`);
+  }
+
+  if (sections.length === 0) {
+    return base;
+  }
+
+  return `${base}\n\n---\n\n${sections.join("\n\n")}`;
+}
+
+/**
+ * @deprecated Static constant kept for any callers still importing it
+ * during the Day 7 transition. Equivalent to calling buildSystemPrompt()
+ * with no inputs — the generic, brand-new-user coach prompt.
+ */
+export const SYSTEM_INSTRUCTION = buildSystemPrompt();

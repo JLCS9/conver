@@ -20,10 +20,12 @@ import { extractBearerFromSubprotocol, verifyClerkBearer } from "./clerkAuth.js"
 import {
   findSessionById,
   findUserByClerkId,
+  findUserWithMemory,
   markSessionAborted,
   markSessionCompleted,
 } from "./supabase.js";
 import { Conversation } from "./conversation.js";
+import type { SystemPromptInputs } from "./llm.js";
 
 const env = loadEnv();
 
@@ -93,11 +95,20 @@ httpServer.on("upgrade", (request, socket, head) => {
       return;
     }
 
-    const user = await findUserByClerkId(verified.clerkUserId);
-    if (!user) {
+    // Day 7-B: fetch user + memory in one batched call. Doing it in
+    // the upgrade handler (before the WS handshake completes) trades
+    // ~50ms of handshake latency for a single round-trip that
+    // populates the system prompt. The mobile's audioReady delay
+    // (600ms after WS open) already absorbs any extra latency here.
+    const memory = await findUserWithMemory(verified.clerkUserId, {
+      vocabLimit: 30,
+      correctionsLimit: 10,
+    });
+    if (!memory) {
       rejectSocket(socket, 404, "User Not Found");
       return;
     }
+    const user = memory.user;
 
     const session = await findSessionById(sessionId);
     if (!session || session.user_id !== user.id) {
@@ -109,10 +120,29 @@ httpServer.on("upgrade", (request, socket, head) => {
       return;
     }
 
+    // Translate Supabase memory into the SystemPromptInputs shape that
+    // buildSystemPrompt understands. Doing the shaping HERE (not in
+    // the LLM module) keeps llm.ts pure of Supabase types.
+    const promptInputs: SystemPromptInputs = {
+      profession: user.user_context.profession,
+      interests: user.user_context.interests,
+      speakingLevel: user.user_context.speaking_level,
+      lastTopics: user.user_context.last_topics,
+      focusGrammar: user.user_context.focus_areas,
+      // Words the user uses most → encourage variety beyond these.
+      overusedWords: memory.topVocabulary.slice(0, 10).map((v) => v.word),
+    };
+
     wss.handleUpgrade(request, socket as never, head, (ws) => {
-      // Pass session context downstream via the request object.
-      (request as IncomingMessage & { sessionId?: string }).sessionId = session.id;
-      (request as IncomingMessage & { userId?: string }).userId = user.id;
+      // Pass session context + system prompt inputs downstream.
+      const reqWithCtx = request as IncomingMessage & {
+        sessionId?: string;
+        userId?: string;
+        promptInputs?: SystemPromptInputs;
+      };
+      reqWithCtx.sessionId = session.id;
+      reqWithCtx.userId = user.id;
+      reqWithCtx.promptInputs = promptInputs;
       wss.emit("connection", ws, request);
     });
   })().catch((err) => {
@@ -122,15 +152,33 @@ httpServer.on("upgrade", (request, socket, head) => {
 });
 
 wss.on("connection", async (clientWs, request) => {
-  const sessionId =
-    (request as IncomingMessage & { sessionId?: string }).sessionId ?? "?";
+  const reqCtx = request as IncomingMessage & {
+    sessionId?: string;
+    userId?: string;
+    promptInputs?: SystemPromptInputs;
+  };
+  const sessionId = reqCtx.sessionId ?? "?";
+  const userId = reqCtx.userId ?? "?";
+  const promptInputs = reqCtx.promptInputs ?? {};
   const startedAt = Date.now();
   const log = logger.child({ sessionId });
 
-  log.info("client connected, starting Conversation pipeline");
+  log.info(
+    {
+      hasProfession: !!promptInputs.profession,
+      interestsCount: promptInputs.interests?.length ?? 0,
+      overusedWordsCount: promptInputs.overusedWords?.length ?? 0,
+      focusGrammarCount: promptInputs.focusGrammar?.length ?? 0,
+    },
+    "client connected, starting Conversation pipeline",
+  );
 
   let closed = false;
-  const conversation = new Conversation(clientWs, log);
+  const conversation = new Conversation(clientWs, log, {
+    sessionId,
+    userId,
+    promptInputs,
+  });
 
   const observedDurationSeconds = () => (Date.now() - startedAt) / 1000;
 

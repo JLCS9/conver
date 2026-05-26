@@ -37,7 +37,13 @@ import { WebSocket } from "ws";
 import type { Logger } from "pino";
 import { openDeepgramStt, type DeepgramSttClient } from "./deepgram.js";
 import { openElevenLabsTts } from "./elevenlabs.js";
-import { streamLLMResponse, SYSTEM_INSTRUCTION, type ChatMessage } from "./llm.js";
+import {
+  buildSystemPrompt,
+  streamLLMResponse,
+  type ChatMessage,
+  type SystemPromptInputs,
+} from "./llm.js";
+import { insertTranscriptTurn } from "./supabase.js";
 
 /** Log only the first chunk and every 50 thereafter — a status line
  *  every ~5s at 100ms chunks, enough to see flow direction during a
@@ -53,12 +59,33 @@ const SESSION_START_TOKEN = "__SESSION_START__";
  *  spend flat across long sessions. 10 turns ≈ 20 messages ≈ 1–2 KB. */
 const HISTORY_TURN_CAP = 10;
 
+export interface ConversationOptions {
+  /** Supabase session row id — used to attach persisted transcripts
+   *  to the right session for later analysis. */
+  sessionId: string;
+  /** Internal user id (NOT clerk id) — fk into users table for
+   *  transcript inserts. */
+  userId: string;
+  /** Personalisation inputs assembled from the user's memory at
+   *  session start. Empty for brand-new users; richer over time as the
+   *  post-session analyser populates the user's profile. */
+  promptInputs: SystemPromptInputs;
+}
+
 export class Conversation {
   private readonly clientWs: WebSocket;
   private readonly log: Logger;
+  private readonly sessionId: string;
+  private readonly userId: string;
+  private readonly systemPrompt: string;
 
   private deepgram: DeepgramSttClient | null = null;
   private history: ChatMessage[] = [];
+
+  /** Monotonically increasing turn index for the conversation. Used as
+   *  the ordering key when we persist turns to Supabase so we can
+   *  reconstruct the conversation in order later. */
+  private turnIndex = 0;
 
   /** Accumulator for Deepgram finals between utterance_end events. */
   private bufferedUserText = "";
@@ -74,9 +101,12 @@ export class Conversation {
 
   private closed = false;
 
-  constructor(clientWs: WebSocket, log: Logger) {
+  constructor(clientWs: WebSocket, log: Logger, opts: ConversationOptions) {
     this.clientWs = clientWs;
     this.log = log;
+    this.sessionId = opts.sessionId;
+    this.userId = opts.userId;
+    this.systemPrompt = buildSystemPrompt(opts.promptInputs);
   }
 
   /** Open STT, ack setupComplete, kick off the warm greeting turn. */
@@ -185,10 +215,20 @@ export class Conversation {
   private handleUtteranceEnd(): void {
     const userText = this.bufferedUserText.trim();
     this.bufferedUserText = "";
-    // Reset the dedupe guard so the next utterance's "Hi" isn't
-    // suppressed because the previous one happened to end with "Hi" too.
     this.lastEmittedTranscript = "";
     if (!userText) return;
+
+    // Persist the user turn before running the model — fire-and-forget
+    // so we don't block the LLM call on a Supabase round-trip.
+    this.turnIndex += 1;
+    void insertTranscriptTurn({
+      sessionId: this.sessionId,
+      userId: this.userId,
+      turnIndex: this.turnIndex,
+      role: "user",
+      text: userText,
+    });
+
     void this.runLLMTurn(userText);
   }
 
@@ -249,7 +289,7 @@ export class Conversation {
       for await (const delta of streamLLMResponse({
         history: this.history.slice(0, -1), // exclude the user msg we just pushed
         userMessage,
-        systemInstruction: SYSTEM_INSTRUCTION,
+        systemInstruction: this.systemPrompt,
         log: turnLog.child({ component: "gemini" }),
       })) {
         if (this.closed) break;
@@ -269,8 +309,20 @@ export class Conversation {
     // LLM is done. Flush TTS so it drains and fires isFinal → onComplete.
     tts.flush();
 
-    if (fullReply.trim()) {
-      this.history.push({ role: "model", text: fullReply.trim() });
+    const trimmedReply = fullReply.trim();
+    if (trimmedReply) {
+      this.history.push({ role: "model", text: trimmedReply });
+
+      // Persist the model turn. Session-start greetings increment
+      // turnIndex here (handleUtteranceEnd didn't run for them).
+      if (userText === SESSION_START_TOKEN) this.turnIndex += 1;
+      void insertTranscriptTurn({
+        sessionId: this.sessionId,
+        userId: this.userId,
+        turnIndex: this.turnIndex,
+        role: "model",
+        text: trimmedReply,
+      });
     }
     // Bound history so token spend stays flat across long sessions.
     if (this.history.length > HISTORY_TURN_CAP * 2) {
