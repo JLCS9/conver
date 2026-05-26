@@ -79,8 +79,15 @@ export class Conversation {
               });
             }
           }
-          // Empty `onPartial` (from SpeechStarted) is our barge-in signal.
-          if (!text) this.handleBargeIn();
+          // Day 6-O: empty onPartial used to call handleBargeIn().
+          // No longer needed — client-side mic gating (Day 6-L) means
+          // the user can't physically speak during a coach turn (the
+          // mic is muted at the source on the device). When Deepgram
+          // fires SpeechStarted it's always a LEGITIMATE new user
+          // turn, not an interruption. Firing a barge-in here would
+          // spuriously send `interrupted: true` to the client after
+          // every coach turn → mobile thinks the model was cut off
+          // and gets into a weird "blocked" UI state.
         },
         onFinal: (text) => {
           if (text !== this.lastEmittedTranscript) {
@@ -445,6 +452,11 @@ export class Conversation {
     if (fullReply.trim()) {
       this.history.push({ role: "model", text: fullReply.trim() });
     }
+    // Day 6-O: explicitly null inflightTts on the success path.
+    // Previously it stayed pointing at the closed tts object, which
+    // tricked any later code reading `this.inflightTts` into thinking
+    // a turn was still in flight.
+    this.inflightTts = null;
     // Bound history to keep token cost flat over long sessions. Each
     // LLM call re-bills the whole context, so unbounded growth is a
     // quadratic cost curve in token spend. Drop the oldest turns once
