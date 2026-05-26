@@ -51,24 +51,68 @@ function AudioPlaybackInner({
     onEndRef.current = onPlaybackEnd;
   }, [onPlaybackStart, onPlaybackEnd]);
 
-  // Persistent listener for the lifetime of the player: track every
-  // playing → not-playing transition. Without this we'd have to attach
-  // a fresh listener per URI and risk missing the end of the last turn.
+  // Persistent listener for the lifetime of the player.
+  //
+  // Day 6-M: use expo-audio's explicit `didJustFinish` flag for the
+  // end signal. Tracking `playing: true → false` transitions misses
+  // edges (the SDK doesn't always emit a status with playing=false on
+  // turn end, especially if a new replace() is queued immediately).
+  // didJustFinish is the SDK's "audio ended this tick" boolean and is
+  // the canonical signal.
+  //
+  // Safety net: if didJustFinish somehow doesn't fire for a turn
+  // (rare, but possible on app backgrounding or audio interruption),
+  // a setTimeout scheduled when the turn STARTS guarantees the end
+  // event fires anyway after (duration + 1s). The user can't get
+  // stuck with the mic paused forever.
+  const safetyEndTimerRef = useRef<NodeJS.Timeout | null>(null);
+
   useEffect(() => {
     const sub = player.addListener("playbackStatusUpdate", (status) => {
       if (!status.isLoaded) return;
-      const isPlaying = status.playing;
-      if (isPlaying && !wasPlayingRef.current) {
+
+      // Detect playback START (transition false → true).
+      if (status.playing && !wasPlayingRef.current) {
         wasPlayingRef.current = true;
-        console.log("[playback] started");
+        console.log(
+          `[playback] started (duration=${status.duration.toFixed(2)}s)`,
+        );
         onStartRef.current?.();
-      } else if (!isPlaying && wasPlayingRef.current) {
+
+        // Schedule a safety end-fire in case didJustFinish gets lost.
+        if (safetyEndTimerRef.current) {
+          clearTimeout(safetyEndTimerRef.current);
+        }
+        const safetyMs = Math.max(1000, status.duration * 1000 + 1000);
+        safetyEndTimerRef.current = setTimeout(() => {
+          if (wasPlayingRef.current) {
+            console.warn(
+              "[playback] safety timer fired — forcing onPlaybackEnd",
+            );
+            wasPlayingRef.current = false;
+            onEndRef.current?.();
+          }
+        }, safetyMs);
+      }
+
+      // Detect playback END via didJustFinish (the SDK's canonical
+      // "this tick is the moment the audio finished" signal).
+      if (status.didJustFinish && wasPlayingRef.current) {
         wasPlayingRef.current = false;
-        console.log("[playback] ended");
+        if (safetyEndTimerRef.current) {
+          clearTimeout(safetyEndTimerRef.current);
+          safetyEndTimerRef.current = null;
+        }
+        console.log("[playback] ended (didJustFinish)");
         onEndRef.current?.();
       }
     });
-    return () => sub.remove();
+    return () => {
+      sub.remove();
+      if (safetyEndTimerRef.current) {
+        clearTimeout(safetyEndTimerRef.current);
+      }
+    };
   }, [player]);
 
   // Per-URI effect: queue + play each new turn's WAV.
