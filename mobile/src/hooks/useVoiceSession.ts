@@ -158,6 +158,17 @@ export function useVoiceSession(): UseVoiceSessionResult {
       if (!bearer) throw new Error("Clerk getToken returned null");
       console.log("[voice] step 2 done, bearer len=", bearer.length);
 
+      // Day 5-I+: prepare audio session BEFORE opening the WS, not after.
+      // setAudioModeAsync({ allowsRecording: true, ... }) switches iOS
+      // to PlayAndRecord category, which fires an audio route-change
+      // notification. If a WS exists when that fires, NSURLSessionWebSocketTask
+      // aborts it with code 1005. So we activate the session FIRST — the
+      // route change fires when no WS exists, then the WS opens into a
+      // stable audio environment and survives.
+      console.log("[voice] step 2.5: prepareAudio (before WS)...");
+      await configureForVoiceSession();
+      console.log("[voice] step 2.5 done");
+
       console.log("[voice] step 3: opening WS...");
       const client = new RealtimeClient({
         wsUrl: session.wsUrl,
@@ -276,14 +287,12 @@ export function useVoiceSession(): UseVoiceSessionResult {
       await client.open();
       console.log("[voice] step 3 done, WS open");
 
-      console.log("[voice] step 4: configureForVoiceSession...");
-      await configureForVoiceSession();
-      console.log("[voice] step 4 done");
-
-      // Step 5 (mic capture) lives in the <MicCapture> child component;
+      // Step 4 (mic capture) lives in the <MicCapture> child component;
       // it mounts when phase === "live" so its useAudioStream hook runs
-      // AFTER the WS is open. See (app)/session.tsx.
-      console.log("[voice] step 5 delegated to MicCapture (mounts on live)");
+      // AFTER the WS is open. The audio session was already prepared
+      // in step 2.5 above, so MicCapture's mount won't trigger a new
+      // route-change notification that could kill the WS.
+      console.log("[voice] step 4 delegated to MicCapture (mounts on live)");
 
       setPhase("live");
     } catch (e) {
