@@ -28,12 +28,19 @@ import { RealtimeClient } from "@/src/services/voice/realtimeClient";
 
 type Phase = "idle" | "starting" | "live" | "stopping" | "ended" | "error";
 
-/** Running transcripts for the current session. Each string is a flat
- * accumulation of all delta fragments Gemini has sent so far; we don't
- * try to demarcate turns yet (UX call for Week 4 polish pass). */
-export interface Transcripts {
-  user: string;
-  model: string;
+/** One side of a turn in the conversation transcript. Built up
+ *  incrementally from server delta events; `complete` flips when the
+ *  turn is fully formed (we've moved to the other speaker, or
+ *  turnComplete fired for the model). The UI renders these as chat
+ *  bubbles. */
+export interface Message {
+  id: string;
+  role: "user" | "model";
+  text: string;
+  complete: boolean;
+  /** Wall-clock when the first delta for this message arrived. Used
+   *  for ordering + display. */
+  createdAt: number;
 }
 
 interface SessionMetadata {
@@ -57,7 +64,8 @@ export interface UseVoiceSessionResult {
   error: string | null;
   metadata: SessionMetadata | null;
   metrics: Metrics;
-  transcripts: Transcripts;
+  /** Ordered list of turns in the current session. Render as a chat. */
+  messages: Message[];
   /** URI of the most recently-assembled turn WAV file. Each new value
    *  is meant to be fed to AudioPlayback for playback. Null until the
    *  first turn is complete with audio. */
@@ -76,7 +84,10 @@ const EMPTY_METRICS: Metrics = {
   timeToFirstResponseMs: null,
 };
 
-const EMPTY_TRANSCRIPTS: Transcripts = { user: "", model: "" };
+/** Tiny id generator — Date.now is unique enough for chat ordering
+ *  within a session (we don't render across sessions). */
+let messageIdCounter = 0;
+const nextMessageId = () => `msg-${Date.now()}-${++messageIdCounter}`;
 
 interface RealtimeSessionResponse {
   sessionId: string;
@@ -98,7 +109,7 @@ export function useVoiceSession(): UseVoiceSessionResult {
   const [error, setError] = useState<string | null>(null);
   const [metadata, setMetadata] = useState<SessionMetadata | null>(null);
   const [metrics, setMetrics] = useState<Metrics>(EMPTY_METRICS);
-  const [transcripts, setTranscripts] = useState<Transcripts>(EMPTY_TRANSCRIPTS);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [playbackUri, setPlaybackUri] = useState<string | null>(null);
 
   const clientRef = useRef<RealtimeClient | null>(null);
@@ -137,7 +148,7 @@ export function useVoiceSession(): UseVoiceSessionResult {
 
     setError(null);
     setMetrics(EMPTY_METRICS);
-    setTranscripts(EMPTY_TRANSCRIPTS);
+    setMessages([]);
     setPlaybackUri(null);
     firstSentAtRef.current = null;
     ttfrRecordedRef.current = false;
@@ -198,9 +209,13 @@ export function useVoiceSession(): UseVoiceSessionResult {
           const sc = msg.serverContent;
           if (!sc) return;
 
-          // User transcript — filter sim hallucinations (Thai/Arabic/CJK
-          // junk produced by Gemini's STT on simulator noise). On a real
-          // device this filter passes English through cleanly.
+          // User transcript delta — append to the open user message,
+          // or start a new one if the last message is from the coach.
+          // Day 8-A: track turns as discrete Message objects so the UI
+          // can render a script-style chat instead of two giant text
+          // blobs. Heuristic for "turn boundary": when a user delta
+          // arrives while the last message is from the model (or
+          // there is no message), open a fresh user message.
           if (sc.inputTranscription?.text) {
             const delta = sc.inputTranscription.text;
             const kept = isLikelyMeaningfulEnglish(delta);
@@ -208,15 +223,61 @@ export function useVoiceSession(): UseVoiceSessionResult {
               `[transcript] user${kept ? "" : " (filtered)"}: ${JSON.stringify(delta)}`,
             );
             if (kept) {
-              setTranscripts((t) => ({ ...t, user: t.user + delta }));
+              setMessages((prev) => {
+                const last = prev[prev.length - 1];
+                if (last && last.role === "user" && !last.complete) {
+                  // Append delta to the open user message.
+                  return [
+                    ...prev.slice(0, -1),
+                    { ...last, text: last.text + delta },
+                  ];
+                }
+                // Start a new user message. Close any open model message.
+                const closed = prev.map((m) =>
+                  m.complete ? m : { ...m, complete: true },
+                );
+                return [
+                  ...closed,
+                  {
+                    id: nextMessageId(),
+                    role: "user",
+                    text: delta,
+                    complete: false,
+                    createdAt: Date.now(),
+                  },
+                ];
+              });
             }
           }
-          // Model transcript — always trust (model speaks English per
-          // language_code: en-US + system instruction).
+
+          // Model transcript delta — append to the open model message
+          // or start a new one. Receiving a model delta implicitly
+          // closes the previous user message (the coach is replying).
           if (sc.outputTranscription?.text) {
             const delta = sc.outputTranscription.text;
             console.log(`[transcript] model: ${JSON.stringify(delta)}`);
-            setTranscripts((t) => ({ ...t, model: t.model + delta }));
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (last && last.role === "model" && !last.complete) {
+                return [
+                  ...prev.slice(0, -1),
+                  { ...last, text: last.text + delta },
+                ];
+              }
+              const closed = prev.map((m) =>
+                m.complete ? m : { ...m, complete: true },
+              );
+              return [
+                ...closed,
+                {
+                  id: nextMessageId(),
+                  role: "model",
+                  text: delta,
+                  complete: false,
+                  createdAt: Date.now(),
+                },
+              ];
+            });
           }
 
           // Audio response path: each modelTurn.parts[*].inlineData is a
@@ -250,6 +311,12 @@ export function useVoiceSession(): UseVoiceSessionResult {
           }
 
           if (sc.turnComplete) {
+            // Mark the open model message as complete so the chat
+            // bubble can render without the "still typing" affordance.
+            setMessages((prev) =>
+              prev.map((m) => (m.complete ? m : { ...m, complete: true })),
+            );
+
             const chunks = turnAudioChunksRef.current;
             const totalBytes = modelAudioBytesRef.current;
             console.log(
@@ -350,5 +417,5 @@ export function useVoiceSession(): UseVoiceSessionResult {
     };
   }, []);
 
-  return { phase, error, metadata, metrics, transcripts, playbackUri, start, stop, sendChunk };
+  return { phase, error, metadata, metrics, messages, playbackUri, start, stop, sendChunk };
 }

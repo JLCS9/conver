@@ -24,7 +24,7 @@ import { useVoiceSession } from "@/src/hooks/useVoiceSession";
 
 export default function SessionScreen() {
   const router = useRouter();
-  const { phase, error, metadata, metrics, transcripts, playbackUri, start, stop, sendChunk } = useVoiceSession();
+  const { phase, error, metadata, metrics, messages, playbackUri, start, stop, sendChunk } = useVoiceSession();
 
   // Day 6-U: confirm before stopping. Users instinctively hold the
   // iPhone close to their face for voice conversations, even with
@@ -131,54 +131,53 @@ export default function SessionScreen() {
 
         {metadata ? (
           <Text style={styles.meta}>
-            session {metadata.sessionId.slice(0, 8)}…  ·  model {metadata.model}  ·  cap {metadata.maxDurationSeconds}s
+            session {metadata.sessionId.slice(0, 8)}…
+            {metrics.timeToFirstResponseMs !== null
+              ? `  ·  primera respuesta ${metrics.timeToFirstResponseMs.toFixed(0)} ms`
+              : ""}
           </Text>
         ) : null}
-
-        <View style={styles.metricsBox}>
-          <Metric label="Chunks sent (mic → Gemini)" value={String(metrics.chunksSent)} />
-          <Metric
-            label="Bytes sent"
-            value={metrics.bytesSent === 0 ? "0" : `${(metrics.bytesSent / 1024).toFixed(1)} KB`}
-          />
-          <Metric label="Chunks received" value={String(metrics.chunksReceived)} />
-          <Metric
-            label="Bytes received"
-            value={metrics.bytesReceived === 0 ? "0" : `${(metrics.bytesReceived / 1024).toFixed(1)} KB`}
-          />
-          <Metric
-            label="TTFA (ws open → first audio chunk)"
-            value={
-              metrics.timeToFirstResponseMs === null
-                ? "—"
-                : `${metrics.timeToFirstResponseMs.toFixed(0)} ms`
-            }
-            highlight={metrics.timeToFirstResponseMs !== null}
-          />
-        </View>
 
         {error ? <Text style={styles.errorText}>{error}</Text> : null}
 
         <View style={styles.transcriptsBox}>
-          <Text style={styles.transcriptLabel}>Tú</Text>
-          <Text style={styles.transcriptUser}>
-            {transcripts.user.trim() ||
-              (isLive
-                ? metrics.chunksSent > 30
-                  ? "(audio sin reconocer — el simulador no tiene mic real)"
-                  : "Escuchando…"
-                : "—")}
-          </Text>
-          <Text style={[styles.transcriptLabel, { marginTop: 12 }]}>Coach</Text>
-          <Text style={styles.transcriptModel}>
-            {transcripts.model.trim() || (isLive ? "Esperando turno…" : "—")}
-          </Text>
+          <Text style={styles.transcriptLabel}>Conversación</Text>
+          {messages.length === 0 ? (
+            <Text style={styles.emptyChat}>
+              {isLive
+                ? "Escucha al coach y responde cuando termine…"
+                : "Pulsa Empezar para iniciar una conversación con tu coach."}
+            </Text>
+          ) : (
+            messages.map((m) => (
+              <View
+                key={m.id}
+                style={[
+                  styles.bubble,
+                  m.role === "user" ? styles.bubbleUser : styles.bubbleCoach,
+                ]}
+              >
+                <Text style={styles.bubbleAuthor}>
+                  {m.role === "user" ? "Tú" : "Coach"}
+                  {!m.complete ? " · escribiendo…" : ""}
+                </Text>
+                <Text
+                  style={[
+                    styles.bubbleText,
+                    m.role === "user" ? styles.bubbleTextUser : styles.bubbleTextCoach,
+                  ]}
+                >
+                  {m.text.trim()}
+                </Text>
+              </View>
+            ))
+          )}
         </View>
 
         <Text style={styles.note}>
           Habla en inglés y el coach te responderá. Si no aparece tu
-          transcripción, espera unos segundos; Gemini necesita oír una
-          frase completa antes de transcribir.
+          transcripción, espera unos segundos: necesita oír una frase
+          completa antes de transcribir.
         </Text>
 
         <Pressable
@@ -276,18 +275,41 @@ const styles = StyleSheet.create({
     color: "#64748b",
     textTransform: "uppercase",
   },
-  transcriptUser: {
-    fontSize: 14,
-    color: "#0f172a",
-    marginTop: 4,
-    lineHeight: 20,
+  emptyChat: {
+    fontSize: 13,
+    color: "#94a3b8",
+    fontStyle: "italic",
+    marginTop: 8,
   },
-  transcriptModel: {
-    fontSize: 14,
-    color: "#0ea5e9",
-    marginTop: 4,
-    lineHeight: 20,
+  // Day 8-A: chat bubble styles — user (you) on the right in brand blue,
+  // coach on the left in neutral. Mirrors common chat UI conventions.
+  bubble: {
+    marginTop: 8,
+    padding: 10,
+    borderRadius: 12,
+    maxWidth: "85%",
   },
+  bubbleUser: {
+    backgroundColor: "#0ea5e9",
+    alignSelf: "flex-end",
+    borderTopRightRadius: 2,
+  },
+  bubbleCoach: {
+    backgroundColor: "#e2e8f0",
+    alignSelf: "flex-start",
+    borderTopLeftRadius: 2,
+  },
+  bubbleAuthor: {
+    fontSize: 11,
+    fontWeight: "600",
+    letterSpacing: 0.5,
+    textTransform: "uppercase",
+    marginBottom: 2,
+    opacity: 0.85,
+  },
+  bubbleText: { fontSize: 15, lineHeight: 22 },
+  bubbleTextUser: { color: "#ffffff" },
+  bubbleTextCoach: { color: "#0f172a" },
   note: { fontSize: 12, color: "#64748b", lineHeight: 18, marginTop: 8 },
   button: {
     borderRadius: 14,

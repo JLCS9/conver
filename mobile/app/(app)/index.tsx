@@ -92,6 +92,14 @@ export default function Home() {
           <Text style={s.primaryButtonText}>Empezar sesión de voz</Text>
         </Pressable>
 
+        <Pressable
+          style={s.button}
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          onPress={() => router.push("/(app)/profile" as any)}
+        >
+          <Text style={s.buttonText}>Mi perfil — vocabulario y correcciones</Text>
+        </Pressable>
+
         <Pressable style={s.button} onPress={() => signOut()}>
           <Text style={s.buttonText}>Cerrar sesión</Text>
         </Pressable>
