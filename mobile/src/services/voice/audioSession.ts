@@ -30,22 +30,36 @@
 import { setAudioModeAsync } from "expo-audio";
 import InCallManager from "react-native-incall-manager";
 
-export async function configureForVoiceSession(): Promise<void> {
-  // 1. InCallManager FIRST — it owns AVAudioSession at the OS level.
-  //    `media: "audio"` puts iOS in playAndRecord + voiceChat mode +
-  //    activates the session. Equivalent to AVAudioSession's
-  //    setCategory(.playAndRecord, mode: .voiceChat, ...) + setActive(true).
-  InCallManager.start({ media: "audio" });
-  // 2. Force speaker output. Without this, PlayAndRecord defaults to
-  //    earpiece (very quiet) on iOS. Both setForce and setSpeakerphoneOn
-  //    are called because empirically one without the other doesn't
-  //    always stick — InCallManager's docs recommend the pair.
-  InCallManager.setForceSpeakerphoneOn(true);
-  InCallManager.setSpeakerphoneOn(true);
+// Day 5-I: critical bug — calling InCallManager.start() inside this
+// function (which runs immediately after the WS handshake) was causing
+// the WS to close with code 1005 right after `open`. Logs:
+//   [voice] step 3 done, WS open
+//   [voice] step 4: configureForVoiceSession...
+//   [ws] closed code=1005 reason=""
+//
+// Root cause is the same iOS audio-interruption-listener footgun
+// documented in MicCapture.tsx for Day-2/3: activating AVAudioSession
+// after a WS is open fires a route-change notification that React
+// Native's NSURLSessionWebSocketTask treats as a fatal interruption
+// and aborts the connection.
+//
+// Fix: split the audio session setup into two phases.
+//   - `prepareAudioSessionForVoiceSession()` runs at handshake time;
+//     it ONLY touches expo-audio's setAudioModeAsync (which sets the
+//     iOS category lazily via expo-audio's queue and does NOT activate
+//     the session immediately). Safe to call before MicCapture mounts.
+//   - `activateInCallSpeakerphone()` is called by MicCapture AFTER it
+//     has mounted (i.e. AFTER the WS is fully live and chunks are
+//     already flowing). At that point an audio-route notification
+//     can't kill a fresh WS — the WS is already established and
+//     React Native treats subsequent route changes as benign.
 
-  // 3. expo-audio session settings — for its recording/playback hooks
-  //    to know that recording is allowed and playback should bypass
-  //    silent mode. These don't override InCallManager's mode setting.
+export async function prepareAudioSessionForVoiceSession(): Promise<void> {
+  // Soft setup: tells expo-audio's hooks that recording is allowed and
+  // that the session should play in silent mode. Maps to AVAudioSession
+  // category playAndRecord but does NOT call setActive(true) immediately
+  // — expo-audio defers activation until the first hook (player or
+  // recorder) actually needs it. That deferral is what keeps the WS safe.
   await setAudioModeAsync({
     allowsRecording: true,
     playsInSilentMode: true,
@@ -54,6 +68,17 @@ export async function configureForVoiceSession(): Promise<void> {
     shouldRouteThroughEarpiece: false,
     allowsBackgroundRecording: false,
   });
+}
+
+export function activateInCallSpeakerphone(): void {
+  // Hard setup: this DOES activate AVAudioSession synchronously and
+  // forces the output to the speaker (overriding the default earpiece
+  // route that playAndRecord category uses on iOS). Triggers the
+  // route-change notification mentioned above — only safe to call
+  // AFTER the WS is fully established and being used.
+  InCallManager.start({ media: "audio" });
+  InCallManager.setForceSpeakerphoneOn(true);
+  InCallManager.setSpeakerphoneOn(true);
 }
 
 export async function releaseAudioSession(): Promise<void> {
@@ -69,4 +94,14 @@ export async function releaseAudioSession(): Promise<void> {
     shouldRouteThroughEarpiece: false,
   });
   InCallManager.stop();
+}
+
+/**
+ * @deprecated Use `prepareAudioSessionForVoiceSession()` at handshake
+ * time and `activateInCallSpeakerphone()` from inside MicCapture's
+ * mount effect. This combined helper is kept only because external
+ * call sites (useVoiceSession) still import it during the transition.
+ */
+export async function configureForVoiceSession(): Promise<void> {
+  await prepareAudioSessionForVoiceSession();
 }

@@ -20,6 +20,7 @@ import {
   GEMINI_STREAM_OPTIONS,
   arrayBufferToBase64,
 } from "@/src/services/voice/audioCapture";
+import { activateInCallSpeakerphone } from "@/src/services/voice/audioSession";
 
 interface MicCaptureProps {
   /** Called for each PCM chunk produced by the mic. Already base64-encoded. */
@@ -79,6 +80,16 @@ function MicCaptureInner({ onChunk }: MicCaptureProps) {
           console.warn("[mic] permission denied, capture won't start");
           return;
         }
+        // Day 5-I: activate InCallManager HERE, not in
+        // configureForVoiceSession. Doing it earlier (during the WS
+        // handshake) was firing an iOS audio-route-change notification
+        // that NSURLSessionWebSocketTask interpreted as a fatal
+        // interruption → WS closed with code 1005 before any audio
+        // could flow. By the time MicCapture mounts, phase === "live"
+        // which means the WS has already exchanged setup messages and
+        // can survive a route change.
+        console.log("[mic] activating InCallManager speakerphone...");
+        activateInCallSpeakerphone();
         console.log("[mic] starting capture...");
         await stream.start();
         if (cancelled) {

@@ -114,11 +114,9 @@ export default function SessionScreen() {
         </View>
 
         <Text style={styles.note}>
-          Día 4: round-trip mic→Gemini→cliente + audio playback del modelo
-          activo. Frames de Google vienen como JSON-as-binary, parseamos
-          con TextDecoder + JSON.parse; PCM 24 kHz int16 → WAV → expo-audio
-          AudioPlayer. En simulador no hay mic real, pero el audio de
-          respuesta sí se reproducirá (cuando haya algo que reproducir).
+          Habla en inglés y el coach te responderá. Si no aparece tu
+          transcripción, espera unos segundos; Gemini necesita oír una
+          frase completa antes de transcribir.
         </Text>
 
         <Pressable
