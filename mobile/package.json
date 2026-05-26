@@ -16,6 +16,7 @@
     "expo-audio": "~56.0.10",
     "expo-auth-session": "~56.0.11",
     "expo-constants": "~56.0.15",
+    "expo-dev-client": "~56.0.16",
     "expo-linking": "~56.0.11",
     "expo-notifications": "~56.0.13",
     "expo-router": "~56.2.6",
