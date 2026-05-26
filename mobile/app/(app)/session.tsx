@@ -45,7 +45,11 @@ export default function SessionScreen() {
       setAudioReady(false);
       return;
     }
-    const t = setTimeout(() => setAudioReady(true), 600);
+    console.log("[session] phase=live → starting 600ms audio mount delay");
+    const t = setTimeout(() => {
+      console.log("[session] audio mount delay elapsed, mounting MicCapture + AudioPlayback");
+      setAudioReady(true);
+    }, 600);
     return () => clearTimeout(t);
   }, [isLive]);
   const isBusy = phase === "starting" || phase === "stopping";
