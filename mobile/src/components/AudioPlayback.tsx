@@ -77,7 +77,7 @@ function AudioPlaybackInner({
 
     // Safety net for when isLoaded never fires (codec error, missing
     // file, etc.). Cleared as soon as the happy path runs.
-    let loadTimeout: NodeJS.Timeout | null = setTimeout(() => {
+    let loadTimeout: ReturnType<typeof setTimeout> | null = setTimeout(() => {
       sub.remove();
       loadTimeout = null;
       try {
