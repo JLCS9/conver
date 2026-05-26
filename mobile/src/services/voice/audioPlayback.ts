@@ -99,7 +99,7 @@ export function buildWavFile(pcmChunks: Uint8Array[]): Uint8Array {
  *  delete — session lifetimes are short, cache is ephemeral, and reuse
  *  is unlikely). */
 export function writeTurnWavToCache(wav: Uint8Array, label: string): string {
-  const file = new File(Paths.cache, `gemini-${label}-${Date.now()}.wav`);
+  const file = new File(Paths.cache, `turn-${label}-${Date.now()}.wav`);
   // `overwrite: true` so a fast turn doesn't collide if Date.now() ms-tick
   // happens to repeat in dev. Cheap insurance.
   file.create({ overwrite: true });

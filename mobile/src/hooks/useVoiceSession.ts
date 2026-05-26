@@ -254,7 +254,7 @@ export function useVoiceSession(): UseVoiceSessionResult {
                 turnCounterRef.current += 1;
                 const uri = writeTurnWavToCache(
                   wav,
-                  `turn${turnCounterRef.current}`,
+                  String(turnCounterRef.current),
                 );
                 console.log(
                   `[voice] wrote turn ${turnCounterRef.current} → ${uri.split("/").pop()} (${wav.byteLength}B WAV)`,
