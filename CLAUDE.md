@@ -1,7 +1,17 @@
 # Converflow — Project context for Claude
 
 > Live decisions and project state. Future Claude sessions read this first.
-> Last updated: 2026-05-25 (Week 3 Day 3 closed — WS open end-to-end on SDK 56).
+> Last updated: 2026-05-27 (Day 8 closed — voice pipeline rebuilt + memory loop live).
+
+## ⚡ Current state quick-read (Day 8)
+
+**Voice loop works end-to-end on real iPhone via Deepgram + Gemini Flash + ElevenLabs hybrid stack.**
+**Memory loop persists every turn, post-session analyser extracts vocabulary + grammar errors + profile facts, next session's coach gets them in the system prompt.**
+**Mobile shows the conversation as a chat (script view) + a "Mi perfil" screen with vocab list, error list, and progress insights.**
+
+Stop reading here if you only need the headline. Detailed Day-by-Day log is in `### Progress log` near the end. The full sub-task tree (Days 5-8) is in the TaskList (~84 entries).
+
+
 
 ## Product
 
@@ -28,8 +38,8 @@ Naming caveat: there is a prior product also called "Converflow" (B2B collection
 | Backend hosting | Hostinger VPS in Paris — Docker Compose for the Next.js container; host nginx (pre-existing on the VPS for other projects) fronts it with certbot SSL |
 | Auth | Clerk (`@clerk/expo` on mobile, `@clerk/nextjs` server-side) |
 | Database | Supabase (Postgres + RLS), region eu-west |
-| Voice IA | **Gemini Live API** (Google AI Studio / Vertex AI, `europe-west1`) |
-| Audio capture/playback | expo-av (fallback to expo-audio if streaming PCM has issues) |
+| Voice IA (since Day 6) | **Hybrid: Deepgram Nova-3 STT + Gemini 2.5 Flash text + ElevenLabs Flash v2.5 TTS**, orchestrated in `voice-gateway/`. (Was Gemini Live until Day 6; the STT was rejecting accented English as Khmer/Thai/Arabic — see Day-6 entry.) |
+| Audio capture/playback | expo-audio SDK 56 (`useAudioStream` for input PCM 16 kHz, `useAudioPlayer` for output WAV); `react-native-incall-manager` for AVAudioSession voiceChat mode + force-speakerphone |
 | Payments primary (EU) | Stripe web checkout via DMA "Steering" |
 | Payments fallback (non-EU) | Apple IAP + Google Play Billing |
 | Email | Resend |
@@ -43,9 +53,19 @@ Naming caveat: there is a prior product also called "Converflow" (B2B collection
 | iOS bundle ID | ai.converflow.app |
 | Backend API | api.converflow.tech → VPS 187.77.166.246 (Hostinger Paris, ~38ms RTT from Madrid measured) |
 
-### Voice provider rationale
+### Voice provider rationale (CURRENT, Day 6+)
 
-The original brief assumed OpenAI Realtime API. After explicit prioritization of latency + price, switched to Gemini Live (~3-5× cheaper than OpenAI Realtime, EU endpoint available). A Phase 2 migration to a Pipecat self-hosted pipeline (Deepgram + Groq + Deepgram Aura) is planned for month 3-4+ once usage justifies the engineering cost. Mobile code lives behind a `VoiceSession` abstraction so the migration touches only `mobile/src/services/voice/`.
+Started on Gemini Live (cheap, EU endpoint). Worked badly in real-iPhone tests: Gemini's STT consistently misrecognised Spanish-accented English as fragments of Khmer / Thai / Arabic. For an app whose entire audience is non-native English speakers, the STT was the hard ceiling. Pricing analysis (Day 5) also revealed that at $8-12/month and a 15 min/day usage target, NO single SaaS voice API is profitable per user — see "Pricing reality check" below.
+
+**Day 6 swap to hybrid** (Deepgram Nova-3 STT + Gemini 2.5 Flash text + ElevenLabs Flash v2.5 TTS) — best STT for accents, cheap text reasoning, top-quality streaming TTS, and full modularity (any piece swappable). Gateway-side orchestration in `voice-gateway/src/conversation.ts`; per-turn flow: client audio → Deepgram → utterance_end → Gemini Flash (with history + memory) streaming text → ElevenLabs streaming audio → client. Mobile wire format preserved (gateway emits Gemini-Live-style JSON envelopes) so mobile didn't have to change.
+
+Self-host migration (Whisper + open LLM + Coqui TTS on GPU) is still the long-term plan when usage justifies the ops cost. The hybrid stack stays modular for that.
+
+### Memory + grammar correction (Day 7+)
+
+Each session's turns persist to `conversation_transcripts`. Post-session, the mobile pings `POST /api/sessions/[id]/analyze`, which reads the full transcript, asks Gemini Flash (strict JSON mode) to extract `{vocabulary, grammar_corrections, context_updates}`, and writes to `user_vocabulary` (UPSERT with count++ + level), `user_grammar_corrections` (INSERT, dupes ok — frequency is signal), and merges `users.user_context` JSONB. Next session's `buildSystemPrompt(userContext)` injects profession / interests / topics / overused-words / focus-grammar-patterns into the coach's instructions so the coach actually KNOWS the user.
+
+Grammar correction is CORE product behaviour and the system prompt is explicit about it: the coach **models** the correct form by repeating the student's sentence naturally ("I goed" → "Oh nice, you went…") instead of lecturing. Examples in prompt. Post-session analyser also captures every detected mistake for the "Mis errores" screen.
 
 ## Repo layout
 
@@ -455,3 +475,44 @@ Day 5 — Reconnect logic on WS drop. iOS audio session interruption handling. T
   - LOW: health endpoint exposes version verbatim.
 
   These get attacked in the Week-4 audit-fix wave (Day 8) — none are blocking for the next iPhone test.
+
+---
+
+### Days 5-8 progress log (2026-05-26 → 2026-05-27)
+
+**Day 5 — iPhone shipping + voice pipeline hardening (Gemini Live era's last gasp).**
+The dev build finally ran on a real iPhone (cable install via Xcode). Found and fixed a long chain of issues:
+- Xcode signing chain (Apple PLA acceptance, provisioning profile, install on `iPhone18,1`).
+- `expo-dev-client` was missing from package.json (regressed in an earlier SDK bump) → builds shipped without the launcher → `RCTFatal "No script URL"`. Reinstalled, regenerated `Info.plist` with `NSLocalNetworkUsageDescription` + `NSBonjourServices` so iOS lets the dev client discover Metro on the LAN.
+- Onboarding gate removed from both `mobile/app/index.tsx` and the gateway's `/api/realtime/session` (was returning 409 `onboarding_incomplete` mid-session). New users get straight to the conversation; profile fills via conversational capture (Day 7).
+- Audio pipeline patched: `mime_type: "audio/pcm;rate=16000"` (Gemini was reinterpreting as 24 kHz → STT mangled), `AudioPlayback` waits for `isLoaded` before `play()`, `audioSession.ts` re-routed via `react-native-incall-manager` (forces `voiceChat` mode + speakerphone — iOS native AEC alone wasn't enough and the volume slider was locking to Ringer because expo-audio's mode was `default`).
+- WS-close-on-handshake bug: calling `InCallManager.start()` activated the AVAudioSession and iOS's audio-route-change notification killed `NSURLSessionWebSocketTask` with `code=1005` before `setupComplete` arrived. Fix in two parts: prepareAudioSession BEFORE WS open (so the route change fires when no WS exists), and split InCallManager.start() into MicCapture's mount effect (so it fires after the WS is established).
+- Several days of fighting `interrupted: true` spurious events; root cause was a Day-5 gateway change (`language_code: "en-US"` inside `input_audio_transcription`) that Gemini Live's v1beta API rejected as `Unknown name` → upstream closed with 1007 → gateway aborted client → "WS dies after handshake" symptom on mobile. Reverting that one line fixed it.
+
+**Day 6 — Migration to Deepgram + Gemini text + ElevenLabs.**
+After the Gemini Live STT kept transcribing accented English as Khmer/Thai gibberish, decided the STT was the ceiling and we needed a different one. Built the hybrid:
+- `voice-gateway/src/deepgram.ts` — thin wrapper around `@deepgram/sdk` LiveClient. Model `nova-3`, encoding linear16/16kHz/mono, `interim_results: true`, `utterance_end_ms: 1000`, `endpointing: 300`, `vad_events: true`, `language: "en"`.
+- `voice-gateway/src/llm.ts` — `streamLLMResponse()` async generator over `@google/genai` Gemini 2.5 Flash text completion, plus `buildSystemPrompt(inputs)` that takes profession/interests/topics/overusedWords/focusGrammar and produces a personalised prompt. Base instruction tells the coach to model grammar fixes naturally ("I goed" → "Oh nice, you went"), never lecture.
+- `voice-gateway/src/elevenlabs.ts` — WS client for `wss://.../v1/text-to-speech/{voice_id}/stream-input?model_id=eleven_flash_v2_5&output_format=pcm_24000`. Voice id Rachel by default (env override). Buffers text that arrives before the WS handshake completes, flushes on `flush()`.
+- `voice-gateway/src/conversation.ts` — per-session orchestrator. State: deepgram client, history, turnIndex, bufferedUserText, lastEmittedTranscript dedupe. On Deepgram utterance_end → push user turn to history → call streamLLMResponse → feed text deltas to ElevenLabs → emit each TTS audio chunk to mobile as Gemini-style `serverContent.modelTurn.parts[].inlineData` BINARY frames. Wire format preserved so mobile didn't change.
+
+Long tail of mobile-side bugs once audio started flowing:
+- Mobile only processed BINARY WS frames; gateway initially sent JSON as TEXT frames → counters stayed at 0 + no audio played. Fix: `ws.send(Buffer.from(json), { binary: true })`.
+- Speaker → mic echo loop ("coach voice in my user transcript"). Two iterations: server-side timer gating (too imprecise, blocked the user for 1-2s past playback) → client-side gating via `AudioPlayback.onPlaybackStart/End` events (exact timing, zero pad). MicCapture's `paused` prop drops chunks at the source so they never reach Deepgram.
+- After every coach turn, iOS silently severed the native audio input (`AVAudioPlayer` took over the session, never gave it back). `stream.isStreaming` returned true but `onBuffer` never fired again. `stream.start()` was a no-op on the dead native object. **The only fix that worked** was force-remounting `MicCapture` via a React `key` change on every `onPlaybackEnd` — useAudioStream then creates a fresh `AudioStream` native object. This is the workaround in `mobile/app/(app)/session.tsx` (`micEpoch` counter).
+- Conversation kept ending after one turn because users were holding the phone close to their cheek and the proximity-no-touch-disable was missing → cheek brushed the big "Terminar sesión" Pressable → `stop()` fired. Wrapped stop() in `Alert.alert` confirmation. Proximity sensor handling is still pending (future polish).
+
+**Day 7 — Memory + grammar correction loop.**
+- Supabase migration: `conversation_transcripts` (per-turn), `user_vocabulary` (word + count + level + example), `user_grammar_corrections` (original + corrected + error_type), `users.user_context` JSONB. Migration SQL in chat history; user ran in Supabase SQL Editor.
+- `voice-gateway/src/supabase.ts`: `findUserWithMemory(clerkUserId)` batches user_context + top vocabulary + recent corrections in two parallel queries; `insertTranscriptTurn()` fire-and-forget so the live pipeline never blocks on DB.
+- `Conversation` constructor accepts `{ sessionId, userId, promptInputs }`. `handleUtteranceEnd` persists user turn; `runLLMTurn` persists model turn including the warm greeting.
+- `voice-gateway/src/server.ts` upgrade handler fetches memory + translates to `SystemPromptInputs` and stashes on `request` for the connection handler to hand into `Conversation`.
+- `backend/lib/sessionAnalyzer.ts` (pure) + `backend/app/api/sessions/[id]/analyze/route.ts` (HTTP surface). Reads transcripts → Gemini Flash strict JSON mode extraction → UPSERT vocabulary (count++), INSERT corrections, MERGE user_context (interests/focus_areas UNION-capped, last_topics REPLACE for recency, scalar fields only-if-evidence).
+- Mobile `useVoiceSession.stop()` fires `POST /api/sessions/:id/analyze` fire-and-forget. Failure is logged warn, no user-facing impact.
+
+**Day 8 — UX over the working pipeline.**
+- Chat-bubble view in `mobile/app/(app)/session.tsx` driven by `messages: Message[]` (replaces the old `{ user, model }` string accumulators). Turn boundary inferred when speaker role switches; turnComplete closes the open model message.
+- Three new backend endpoints: `GET /api/me/vocabulary`, `GET /api/me/grammar-corrections`, `GET /api/me/insights` (the last batches four sub-queries server-side for the summary tab).
+- `mobile/app/(app)/profile.tsx` with three tabs (Resumen / Vocabulario / Errores), pull-to-refresh, pretty error-type names. Home gets a "Mi perfil" button.
+
+**State at end of Day 8:** voice loop works, memory loop works, mobile has chat view + profile. Demo-able. What's outstanding before "ship-able V1": pronunciation scoring (Day 9 stretch), proximity-sensor handling, pricing/Stripe, push notification cadence, streak/retention UX, and the audit punch list items from the earlier "Week-4 audit" block above.
