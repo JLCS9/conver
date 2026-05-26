@@ -313,6 +313,7 @@ export function useVoiceSession(): UseVoiceSessionResult {
 
   const stop = useCallback(async () => {
     if (phase !== "live") return;
+    console.log("[voice] stop() called");
     setPhase("stopping");
     try { clientRef.current?.close(); } catch { /* ignore */ }
     clientRef.current = null;

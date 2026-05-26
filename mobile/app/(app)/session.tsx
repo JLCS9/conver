@@ -10,6 +10,7 @@ import { useRouter } from "expo-router";
 import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -24,6 +25,24 @@ import { useVoiceSession } from "@/src/hooks/useVoiceSession";
 export default function SessionScreen() {
   const router = useRouter();
   const { phase, error, metadata, metrics, transcripts, playbackUri, start, stop, sendChunk } = useVoiceSession();
+
+  // Day 6-U: confirm before stopping. Users instinctively hold the
+  // iPhone close to their face for voice conversations, even with
+  // speakerphone on — and a cheek brush can register as a tap on the
+  // big "Terminar sesión" Pressable, killing the session mid-turn
+  // (verified by [voice] stop() called appearing right after a
+  // playback ends, with no real user intent). A confirm dialog
+  // intercepts accidental taps without slowing intentional ones.
+  const stopWithConfirm = () => {
+    Alert.alert(
+      "¿Terminar sesión?",
+      "Vas a cerrar la conversación con el coach.",
+      [
+        { text: "Cancelar", style: "cancel" },
+        { text: "Terminar", style: "destructive", onPress: () => stop() },
+      ],
+    );
+  };
 
   const isLive = phase === "live";
 
@@ -149,7 +168,7 @@ export default function SessionScreen() {
         </Text>
 
         <Pressable
-          onPress={isLive ? stop : start}
+          onPress={isLive ? stopWithConfirm : start}
           disabled={isBusy || !canTrigger}
           style={[
             styles.button,
