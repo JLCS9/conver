@@ -59,6 +59,18 @@ function MicCaptureInner({ onChunk, paused = false }: MicCaptureProps) {
     pausedRef.current = paused;
   }, [paused]);
 
+  // Day 6-V: kick the stream back on when leaving the paused state.
+  // Empirically (confirmed by the absence of any [mic] chunk #N log
+  // after [mic] unpaused), iOS's AVAudioPlayer silently interrupts
+  // useAudioStream's input recording when playback starts. The native
+  // input never resumes on its own when playback ends — our pausedRef
+  // flips false but the onBuffer callback simply never fires again.
+  //
+  // Fix: when paused goes true → false, check stream.isStreaming. If
+  // it's false, call stream.start() to revive the native recording.
+  // Calling start() on an already-streaming stream is a no-op (safe).
+  const prevPausedRef = useRef(paused);
+
   // Counter for log-throttling — chunks arrive every ~10-50 ms, we don't
   // want to spam Metro with thousands of log lines.
   const chunkLogCounterRef = useRef(0);
@@ -103,6 +115,32 @@ function MicCaptureInner({ onChunk, paused = false }: MicCaptureProps) {
   );
 
   const { stream } = useAudioStream(streamOptions);
+
+  // Day 6-V: revive the native input stream when leaving paused.
+  // Runs on every paused-prop change; only acts on true → false.
+  useEffect(() => {
+    const wasPaused = prevPausedRef.current;
+    prevPausedRef.current = paused;
+    if (paused || !wasPaused) return; // only act on the unpaused edge
+
+    // Give iOS a beat to settle its audio session post-playback before
+    // we ask for the input back. Empirical 200ms — too short and the
+    // start() races AVAudioPlayer's tear-down; too long and the user
+    // notices a gap.
+    const t = setTimeout(() => {
+      if (!stream) return;
+      if (stream.isStreaming) {
+        console.log("[mic] stream still streaming after unpause — no kick needed");
+        return;
+      }
+      console.log("[mic] stream silently paused by iOS — kicking start()");
+      stream
+        .start()
+        .then(() => console.log("[mic] kick succeeded"))
+        .catch((err) => console.warn("[mic] kick failed", err));
+    }, 200);
+    return () => clearTimeout(t);
+  }, [paused, stream]);
 
   useEffect(() => {
     let cancelled = false;
