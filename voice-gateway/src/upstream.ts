@@ -146,15 +146,22 @@ export function openUpstream(
           // Ask the upstream to also send the user's transcribed audio
           // back as text — the client renders this live above the orb.
           //
-          // Day 5-F: previously these were empty `{}`. Gemini Live's STT
-          // would then run auto-language-detection on each input chunk
-          // and on Spanish-accented English happily mislabeled phonemes
-          // as Arabic / Dutch / Thai. Pinning `language_code: "en-US"`
-          // here removes the per-chunk LID and forces the STT pipeline
-          // to interpret all input as English. speech_config.language_code
-          // already pins it for TTS output; this pins it for STT input.
-          input_audio_transcription: { language_code: "en-US" },
-          output_audio_transcription: { language_code: "en-US" },
+          // Day 5-J revert: tried adding `language_code: "en-US"` here
+          // (Day 5-F) to force Gemini's STT to interpret input as
+          // English. Gemini's v1beta DOES NOT ACCEPT that field on
+          // these sub-configs — only on `speech_config`. It rejected
+          // every setup with 1007 "Unknown name language_code at
+          // 'setup.input_audio_transcription'" → upstream closed
+          // abnormally → gateway aborted client WS → user saw
+          // "No script URL / WS closed 1005" on iPhone. Back to empty
+          // objects, which DO enable the transcription stream (the
+          // logs from Day 4 confirmed user/model transcripts flowed
+          // with this exact shape). Language hinting for STT input is
+          // already handled by `speech_config.language_code` above
+          // (per Google's docs the speech_config rate applies to both
+          // input STT and TTS output).
+          input_audio_transcription: {},
+          output_audio_transcription: {},
         },
       };
       try {
