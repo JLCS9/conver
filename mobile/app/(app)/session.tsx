@@ -73,6 +73,20 @@ export default function SessionScreen() {
   // the user's words once playback ends (the unmute is event-driven,
   // no extra padding seconds).
   const [coachIsSpeaking, setCoachIsSpeaking] = useState(false);
+
+  // Day 6-Y: force-remount MicCapture after each coach turn ends.
+  // Day 6-X gateway logs proved iOS silently severs the input source
+  // when AVAudioPlayer takes the audio session, and stream.start()
+  // afterwards is a no-op even though isStreaming returns true. The
+  // only reliable way we've found to bring the native AudioStream back
+  // online is to fully recreate the useAudioStream hook — which happens
+  // when MicCapture unmounts + remounts. Bumping `micEpoch` as the key
+  // does exactly that without disturbing the WS / AudioPlayback.
+  const [micEpoch, setMicEpoch] = useState(0);
+  const handlePlaybackEnd = () => {
+    setCoachIsSpeaking(false);
+    setMicEpoch((e) => e + 1);
+  };
   const isBusy = phase === "starting" || phase === "stopping";
   const canTrigger = phase === "idle" || phase === "ended" || phase === "error" || isLive;
 
@@ -190,11 +204,15 @@ export default function SessionScreen() {
           state from useVoiceSession; each new URI triggers playback. */}
       {isLive && audioReady ? (
         <>
-          <MicCapture onChunk={sendChunk} paused={coachIsSpeaking} />
+          <MicCapture
+            key={`mic-${micEpoch}`}
+            onChunk={sendChunk}
+            paused={coachIsSpeaking}
+          />
           <AudioPlayback
             uri={playbackUri}
             onPlaybackStart={() => setCoachIsSpeaking(true)}
-            onPlaybackEnd={() => setCoachIsSpeaking(false)}
+            onPlaybackEnd={handlePlaybackEnd}
           />
         </>
       ) : null}
