@@ -134,6 +134,24 @@ export class Conversation {
     }
     const chunks = msg.realtime_input?.media_chunks;
     if (!chunks || chunks.length === 0) return;
+
+    // Half-duplex gate. If the coach's TTS is actively playing, don't
+    // forward mic audio to Deepgram — the iPhone's speaker output is
+    // loud enough that the mic re-captures it and Deepgram cheerfully
+    // transcribes the coach's words as if the user said them ("Hi
+    // there. It's great to connect" appearing in the user transcript
+    // while the coach is saying exactly that line). iOS's native AEC
+    // in voiceChat mode is not aggressive enough for handsfree-speaker
+    // distance + iPhone built-in mic.
+    //
+    // Trade-off: this also disables barge-in (the user can't interrupt
+    // the coach mid-sentence). Acceptable for the demo. To recover
+    // barge-in we'd need either a proper AEC (Krisp, Pipecat) or a
+    // client-side VAD that distinguishes user voice from speaker echo.
+    if (this.modelHasStartedSpeaking) {
+      return;
+    }
+
     for (const c of chunks) {
       const pcm = Buffer.from(c.data, "base64");
       this.chunksFromClient += 1;
@@ -275,6 +293,14 @@ export class Conversation {
       this.history.push({ role: "user", text: userText });
     }
 
+    // Track audio bytes + first-chunk timestamp so we can estimate
+    // when the client will finish playing (the mic-ducking gate needs
+    // to stay engaged until then, not just until the gateway is done
+    // sending). PCM 24 kHz mono int16 = 48000 bytes/second.
+    let audioBytesThisTurn = 0;
+    let firstAudioAtMs = 0;
+    const PCM_24K_MONO_BYTES_PER_SEC = 48000;
+
     // Open the TTS WS as soon as we know we're about to speak. The
     // ~50ms handshake overlaps with the first LLM token.
     const tts = openElevenLabsTts(
@@ -285,6 +311,9 @@ export class Conversation {
           // utterance shouldn't cancel anything — the greeting hasn't
           // even been heard yet.
           this.modelHasStartedSpeaking = true;
+          if (firstAudioAtMs === 0) firstAudioAtMs = Date.now();
+          audioBytesThisTurn += pcm.byteLength;
+
           this.chunksToClient += 1;
           if (shouldLogAudioChunk(this.chunksToClient)) {
             turnLog.info(
@@ -309,8 +338,32 @@ export class Conversation {
         onComplete: () => {
           turnLog.info("tts complete → turnComplete to client");
           this.sendJson({ serverContent: { turnComplete: true } });
-          this.modelHasStartedSpeaking = false;
           tts.close();
+
+          // Delay the mic re-engage until the client has finished
+          // playing the audio we just streamed. ElevenLabs delivers
+          // audio roughly in real-time, so when isFinal arrives the
+          // last bytes are still in flight + buffered for playback on
+          // the client. Estimate remaining playback time from total
+          // bytes streamed vs wall-clock since first chunk.
+          const audioDurationMs =
+            (audioBytesThisTurn / PCM_24K_MONO_BYTES_PER_SEC) * 1000;
+          const elapsedSinceFirstChunkMs =
+            firstAudioAtMs > 0 ? Date.now() - firstAudioAtMs : 0;
+          const remainingPlaybackMs = Math.max(
+            0,
+            audioDurationMs - elapsedSinceFirstChunkMs,
+          );
+          // +400ms safety margin: covers network jitter + client-side
+          // playback buffer + speaker tail.
+          const reEngageInMs = remainingPlaybackMs + 400;
+          turnLog.info(
+            { reEngageInMs, audioDurationMs },
+            "scheduling mic re-engage after playback",
+          );
+          setTimeout(() => {
+            this.modelHasStartedSpeaking = false;
+          }, reEngageInMs);
         },
         onError: (err) => {
           turnLog.error({ err }, "tts error mid-turn");
