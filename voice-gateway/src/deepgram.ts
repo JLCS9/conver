@@ -98,6 +98,13 @@ export function openDeepgramStt(
     // tells us if Deepgram considers this chunk stable.
     const alt = data?.channel?.alternatives?.[0];
     const text = (alt?.transcript ?? "").trim();
+    // Day 6-X: log EVERY transcript event including empty ones, with
+    // is_final flag. Lets us see whether a partial ever turns into a
+    // final, which is what we need to confirm utterance_end will fire.
+    log.info(
+      { is_final: !!data.is_final, text, hasText: !!text },
+      "deepgram transcript event",
+    );
     if (!text) return; // silence / whitespace-only transcripts
     if (data.is_final) {
       callbacks.onFinal(text);
@@ -107,12 +114,14 @@ export function openDeepgramStt(
   });
 
   live.on(LiveTranscriptionEvents.UtteranceEnd, () => {
+    log.info("deepgram utterance_end event"); // Day 6-X
     callbacks.onUtteranceEnd();
   });
 
   live.on(LiveTranscriptionEvents.SpeechStarted, () => {
-    // Surface upstream as a partial signal — the orchestrator uses this
-    // to interrupt an in-flight model response (barge-in).
+    log.info("deepgram speech_started event"); // Day 6-X
+    // Empty payload — caller decides what to do (we ignore on the
+    // mobile-gated half-duplex pipeline).
     callbacks.onPartial("");
   });
 
