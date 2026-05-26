@@ -175,13 +175,22 @@ export class Conversation {
   }
 
   /**
-   * Barge-in: user started speaking while the model was still producing
-   * audio. Cancel the LLM stream + close the in-flight TTS, then tell
-   * the client to drop any queued playback.
+   * Barge-in: user started speaking while the model was actually
+   * producing audio (not just starting up). Cancel the in-flight LLM
+   * stream + close TTS, tell the client to drop queued playback.
+   *
+   * Gating on `modelHasStartedSpeaking` matters: Deepgram fires
+   * SpeechStarted on every utterance, including the user's very first
+   * one in the session. Without this gate, the first user utterance
+   * would cancel the warm-up greeting before any audio had been sent
+   * to the client — which is exactly what the Day 6 test showed
+   * (interrupted frame immediately after setupComplete, no greeting
+   * audio ever played).
    */
   private handleBargeIn(): void {
+    if (!this.modelHasStartedSpeaking) return;
     if (!this.inflightAbort && !this.inflightTts) return;
-    this.log.info("barge-in detected");
+    this.log.info("barge-in detected (model was speaking)");
     try {
       this.inflightAbort?.abort();
     } catch {
@@ -190,8 +199,14 @@ export class Conversation {
     this.inflightTts?.close();
     this.inflightAbort = null;
     this.inflightTts = null;
+    this.modelHasStartedSpeaking = false;
     this.sendJson({ serverContent: { interrupted: true } });
   }
+
+  /** Flips true on the first model audio chunk of a turn, back to false
+   *  on turnComplete or barge-in. The barge-in gate uses this so we
+   *  don't cancel a turn before the user can even hear it. */
+  private modelHasStartedSpeaking = false;
 
   /**
    * Deepgram fired utterance_end — the user has finished talking. The
@@ -237,6 +252,11 @@ export class Conversation {
     const tts = openElevenLabsTts(
       {
         onAudio: (pcm) => {
+          // Flip the barge-in gate the first time audio actually flows
+          // to the client. Until this point, an interrupting user
+          // utterance shouldn't cancel anything — the greeting hasn't
+          // even been heard yet.
+          this.modelHasStartedSpeaking = true;
           this.chunksToClient += 1;
           if (shouldLogAudioChunk(this.chunksToClient)) {
             turnLog.info(
@@ -261,6 +281,7 @@ export class Conversation {
         onComplete: () => {
           turnLog.info("tts complete → turnComplete to client");
           this.sendJson({ serverContent: { turnComplete: true } });
+          this.modelHasStartedSpeaking = false;
           tts.close();
         },
         onError: (err) => {
