@@ -28,6 +28,17 @@ import { RealtimeClient } from "@/src/services/voice/realtimeClient";
 
 type Phase = "idle" | "starting" | "live" | "stopping" | "ended" | "error";
 
+/** State machine for the post-session analyser call (vocab + grammar
+ *  + context extraction). Used by the UI to show an "analizando…"
+ *  modal while the user waits for the data to land in Profile. */
+export type AnalyzeState = "idle" | "analyzing" | "done" | "failed";
+
+export interface AnalyzeResult {
+  turnsAnalyzed: number;
+  vocabularyAdded: number;
+  correctionsAdded: number;
+}
+
 /** One side of a turn in the conversation transcript. Built up
  *  incrementally from server delta events; `complete` flips when the
  *  turn is fully formed (we've moved to the other speaker, or
@@ -70,6 +81,11 @@ export interface UseVoiceSessionResult {
    *  is meant to be fed to AudioPlayback for playback. Null until the
    *  first turn is complete with audio. */
   playbackUri: string | null;
+  /** Post-session analyser progress — drives the "Analizando…" modal. */
+  analyzeState: AnalyzeState;
+  analyzeResult: AnalyzeResult | null;
+  /** Dismisses the analyser modal (resets analyzeState back to "idle"). */
+  dismissAnalyze: () => void;
   start: () => Promise<void>;
   stop: () => Promise<void>;
   /** Push a base64-encoded PCM chunk to the upstream. No-op if WS not open. */
@@ -99,6 +115,8 @@ interface RealtimeSessionResponse {
 export function useVoiceSession(): UseVoiceSessionResult {
   const { getToken } = useAuth();
   const [phase, setPhase] = useState<Phase>("idle");
+  const [analyzeState, setAnalyzeState] = useState<AnalyzeState>("idle");
+  const [analyzeResult, setAnalyzeResult] = useState<AnalyzeResult | null>(null);
 
   // Debug: trace every phase transition. If the session "blocks", knowing
   // which state we slipped into (and from what) is the difference between
@@ -387,26 +405,39 @@ export function useVoiceSession(): UseVoiceSessionResult {
     try { await releaseAudioSession(); } catch { /* ignore */ }
     setPhase("ended");
 
-    // Day 7-C: kick off the post-session analyser. Fire-and-forget so
-    // we don't make the user wait on the UI thread for the extraction
-    // to complete. If it fails, no user-facing impact — the vocabulary
-    // / corrections / context just don't update for this session. The
-    // next session still benefits from prior sessions' analyses.
+    // Day 7-C / Day 9-H: kick off the post-session analyser. We still
+    // run it as a background promise (so the UI thread is never
+    // blocked) but we now expose `analyzeState` so the screen can show
+    // a "Analizando…" modal with a "Ver progreso" button on success.
     const sessionIdForAnalysis = metadata?.sessionId;
     if (sessionIdForAnalysis) {
+      setAnalyzeResult(null);
+      setAnalyzeState("analyzing");
       void (async () => {
         try {
-          const res = await api<{ ok: boolean; turnsAnalyzed: number; vocabularyAdded: number; correctionsAdded: number }>(
+          const res = await api<AnalyzeResult & { ok: boolean }>(
             `/api/sessions/${sessionIdForAnalysis}/analyze`,
             { method: "POST", getToken, timeoutMs: 30_000 },
           );
           console.log("[voice] post-session analysis ok", res);
+          setAnalyzeResult({
+            turnsAnalyzed: res.turnsAnalyzed,
+            vocabularyAdded: res.vocabularyAdded,
+            correctionsAdded: res.correctionsAdded,
+          });
+          setAnalyzeState("done");
         } catch (err) {
           console.warn("[voice] post-session analysis failed (non-fatal)", err);
+          setAnalyzeState("failed");
         }
       })();
     }
   }, [phase, metadata?.sessionId, getToken]);
+
+  const dismissAnalyze = useCallback(() => {
+    setAnalyzeState("idle");
+    setAnalyzeResult(null);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -417,5 +448,18 @@ export function useVoiceSession(): UseVoiceSessionResult {
     };
   }, []);
 
-  return { phase, error, metadata, metrics, messages, playbackUri, start, stop, sendChunk };
+  return {
+    phase,
+    error,
+    metadata,
+    metrics,
+    messages,
+    playbackUri,
+    analyzeState,
+    analyzeResult,
+    dismissAnalyze,
+    start,
+    stop,
+    sendChunk,
+  };
 }

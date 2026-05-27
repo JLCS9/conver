@@ -6,7 +6,7 @@
 
 import { useAuth } from "@clerk/clerk-expo";
 import { useRouter } from "expo-router";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -82,16 +82,26 @@ export default function ProfileScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // getToken in a ref so `load` stays stable. Clerk recreates getToken
+  // on every render — if `load` depended on it directly, the useEffect
+  // below would refire on every render and hammer the backend (we hit
+  // exactly this bug in Day-9-G on the Home screen).
+  const getTokenRef = useRef(getToken);
+  useEffect(() => {
+    getTokenRef.current = getToken;
+  }, [getToken]);
+
   // Three endpoints fired in parallel — total time is the slowest of the
   // three, not the sum. The insights endpoint already batches its own
   // four sub-queries server-side.
   const load = useCallback(async () => {
+    const gt = getTokenRef.current;
     setError(null);
     try {
       const [insightsRes, vocabRes, corrRes] = await Promise.all([
-        api<InsightsResponse>("/api/me/insights", { getToken }),
-        api<VocabularyResponse>("/api/me/vocabulary?sort=count&limit=200", { getToken }),
-        api<CorrectionsResponse>("/api/me/grammar-corrections?limit=100", { getToken }),
+        api<InsightsResponse>("/api/me/insights", { getToken: gt }),
+        api<VocabularyResponse>("/api/me/vocabulary?sort=count&limit=200", { getToken: gt }),
+        api<CorrectionsResponse>("/api/me/grammar-corrections?limit=100", { getToken: gt }),
       ]);
       setInsights(insightsRes);
       setVocab(vocabRes.vocabulary);
@@ -102,7 +112,7 @@ export default function ProfileScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [getToken]);
+  }, []); // stable — uses getTokenRef.current
 
   useEffect(() => {
     void load();

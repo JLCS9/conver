@@ -2,7 +2,7 @@
 
 > One-page state of the app for the next Claude session. Read this FIRST,
 > then dip into `CLAUDE.md` for full context if needed.
-> Last refreshed: 2026-05-27 (end of Day 8).
+> Last refreshed: 2026-05-27 (end of Day 9 polish — Home + Session UI).
 
 ## What works today (demo-able)
 
@@ -23,6 +23,24 @@
   blue, coach left grey) driven by `messages: Message[]`. `(app)/profile.tsx`
   is a three-tab screen (Resumen / Vocabulario / Errores) backed by
   `/api/me/insights` + `/api/me/vocabulary` + `/api/me/grammar-corrections`.
+- **Home dashboard (Day 9).** `(app)/index.tsx` now leads with a streak
+  hero (🔥 + N días seguidos), a hand-rolled 7-day bar chart (today
+  highlighted), three stat cards (sesión media · palabras · sesiones
+  últimos 7 días), a 124-px round chat CTA in brand blue, a "My Progress"
+  secondary entry to the profile screen, and a discreet grey "Cerrar
+  sesión" link at the bottom. Data comes from a new
+  `/api/me/activity` endpoint (streak, 7-day series, totals).
+  Uses `useFocusEffect` so the chart refreshes whenever the user comes
+  back from a session.
+- **Session screen polish (Day 9).** Removed the "VOICE SPIKE · Día 3"
+  eyebrow and all the debug metadata (phase pill, session id, TTFA).
+  Now: clean top bar, full-height chat scroll that auto-scrolls to
+  the latest bubble, a single status pill above the bottom CTA
+  ("Te escucho — habla" / "El coach está hablando" with pulse / etc),
+  and a single bottom button (mic icon when idle, stop icon when live).
+  Critical audio guards untouched — `audioReady` 600 ms delay,
+  `coachIsSpeaking` gating, `micEpoch` force-remount, `stopWithConfirm`
+  are all preserved (see file header for the load-bearing comments).
 
 ## Known-acceptable trade-offs (don't "fix" without rethinking)
 
@@ -60,12 +78,15 @@ loses ~$25/user/month at scale. Options (Day-5 conversation):
 
 ## Outstanding / pending work
 
-- **Backend deploy of Day 8 endpoints.** Mobile is calling `/api/me/insights`
-  + `/api/me/vocabulary` + `/api/me/grammar-corrections` but the user reported
-  404s — last known state was the VPS hadn't pulled `e161ebb` yet. First
-  action of next session: confirm deploy with
+- **Backend deploy of Day 8 + Day 9 endpoints.** Mobile is calling
+  `/api/me/insights` + `/api/me/vocabulary` + `/api/me/grammar-corrections`
+  (Day 8) + `/api/me/activity` (Day 9 — the new Home dashboard payload:
+  streak, 7-day series, totals). VPS needs to pull and rebuild. First
+  action of any new session: confirm deploy with
   `ssh tu-vps "cd /opt/converflow && git log --oneline -3"` and run
-  `./scripts/deploy.sh` if needed.
+  `./scripts/deploy.sh` if needed. The Home screen renders gracefully
+  on a 404 (shows zeros and an error pill) so the app doesn't break
+  before deploy, but the dashboard is empty until the endpoint ships.
 - **Pronunciation scoring** (task #81, Day 9 stretch). Options to evaluate:
   Speechace API ($$), Azure Pronunciation Assessment, Deepgram word-level
   confidence as a proxy, or self-hosted wav2vec2. Decide vendor first.
@@ -93,8 +114,10 @@ loses ~$25/user/month at scale. Options (Day-5 conversation):
 | `backend/app/api/sessions/[id]/analyze/route.ts` | The persistence side of the analyser: vocab UPSERT, corrections INSERT, context MERGE. |
 | `mobile/src/components/MicCapture.tsx` | iOS audio-stream lifecycle + `paused` prop + force-remount via `key`. |
 | `mobile/src/components/AudioPlayback.tsx` | Duration-based timer for playback start/end events. Drives the mic gate via onPlaybackStart/End callbacks. |
-| `mobile/app/(app)/session.tsx` | Chat view + `coachIsSpeaking` + `micEpoch` (force-remount trigger). |
+| `mobile/app/(app)/session.tsx` | Chat view + `coachIsSpeaking` + `micEpoch` (force-remount trigger). File header lists the four audio guards that MUST NOT regress in any UI polish. |
 | `mobile/app/(app)/profile.tsx` | Memory-display UI. |
+| `mobile/app/(app)/index.tsx` | Home dashboard — streak hero + 7-day bar chart (hand-rolled with Views, no SVG dep) + 3 stat cards + round chat CTA + secondary "My Progress" + discreet logout. Refetches on focus. |
+| `backend/app/api/me/activity/route.ts` | Powers the Home dashboard. Computes streak in JS by walking days backwards from today; honours `users.timezone`. |
 
 ## Env vars on the VPS (`/opt/converflow/backend/.env.local`)
 
